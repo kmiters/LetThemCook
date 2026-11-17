@@ -27,12 +27,14 @@ def main():
     p.add_argument('name', type=nonempty)
     p.add_argument('path', help='Existing Git checkout')
     p.add_argument('--description', default='')
+    p.add_argument('--space', help='Herdr Space ID')
     project.add_parser('list')
     p = project.add_parser('show')
     p.add_argument('name')
     p = project.add_parser('update')
     p.add_argument('name')
     p.add_argument('--path')
+    p.add_argument('--space', help='Herdr Space ID')
     p.add_argument('--description')
     task = commands.add_parser('task').add_subparsers(dest='action', required=True)
     p = task.add_parser('add')
@@ -73,6 +75,11 @@ def main():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         ''')
+        columns = {row['name'] for row in conn.execute('PRAGMA table_info(projects)')}
+        if 'space' not in columns:
+            conn.execute('ALTER TABLE projects ADD COLUMN space TEXT')
+        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS projects_space ON projects(space)')
+
         def project_id(name):
             row = conn.execute('SELECT id FROM projects WHERE name = ?', (name,)).fetchone()
             if row is None:
@@ -87,7 +94,7 @@ def main():
 
         if args.command == 'project':
             if args.action == 'add':
-                conn.execute('INSERT INTO projects (name, path, description) VALUES (?, ?, ?)', (args.name, checkout(args.path), args.description))
+                conn.execute('INSERT INTO projects (name, path, description, space) VALUES (?, ?, ?, ?)', (args.name, checkout(args.path), args.description, nonempty(args.space) if args.space is not None else None))
                 result = dict(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
             elif args.action == 'list':
                 result = [dict(row) for row in conn.execute('SELECT * FROM projects ORDER BY name')]
@@ -96,11 +103,13 @@ def main():
                 result = dict(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
             else:
                 project_id(args.name)
-                updates = {k: getattr(args, k) for k in ('path', 'description') if getattr(args, k) is not None}
+                updates = {k: getattr(args, k) for k in ('path', 'description', 'space') if getattr(args, k) is not None}
                 if not updates:
-                    raise ValueError('Specify --path or --description')
+                    raise ValueError('Specify --path, --space or --description')
                 if 'path' in updates:
                     updates['path'] = checkout(updates['path'])
+                if 'space' in updates:
+                    updates['space'] = nonempty(updates['space'])
                 conn.execute('UPDATE projects SET ' + ', '.join(k + ' = ?' for k in updates) + ', updated_at = CURRENT_TIMESTAMP WHERE name = ?', (*updates.values(), args.name))
                 result = dict(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
         elif args.action == 'add':

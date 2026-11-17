@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Register a checkout and start its Chef in the selected Herdr Space.
+set -euo pipefail
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ] || [ "${1:-}" = "--help" ]; then
+  echo "Usage: ltc-project NAME CHECKOUT SPACE_ID [DESCRIPTION]" >&2
+  exit 2
+fi
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+name="$1"
+"$root/bin/ltc-db" project add "$name" "$2" --space "$3" --description "${4:-}"
+if ! "$root/bin/ltc-chef" "$name"; then
+  echo "Project was registered, but Chef did not start. Fix the error and retry: $root/bin/ltc-chef $name" >&2
+  exit 1
+fi

@@ -2,6 +2,7 @@
 """Create an isolated Cook worktree and launch it in Herdr Desktop."""
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -22,6 +23,7 @@ def main():
     parser.add_argument('--profile', help='Configured Cook model profile')
     parser.add_argument('--task', required=True, help='Self-contained task brief')
     parser.add_argument('--base', default='HEAD', help='Committed base (default: HEAD)')
+    parser.add_argument('--chef', default=os.environ.get('HC_TERMINAL_ID'), help='Chef terminal address for Cook reports (defaults to HC_TERMINAL_ID)')
     parser.add_argument('--config', default=str(ROOT / 'config.json'), help='JSON configuration')
     args = parser.parse_args()
     if not re.fullmatch(r'[a-z0-9_-]{1,32}', args.name) or not re.fullmatch(r'[a-zA-Z0-9_-]+', args.space) or not args.task.strip():
@@ -58,7 +60,14 @@ def main():
     run(['git', '-C', str(project), 'worktree', 'add', '--detach', str(target), base])
 
     prompt = cook_prompt + '\n\n# Task\n' + args.task + '\n\nYour worktree: ' + str(target)
-    cmd = ['hc', 'run', '--bg', '--no-parent', '--name', args.name, '--cwd', str(target), '--label', 'herdr.space=' + args.space, '--', 'codex', '--no-daemon']
+    if args.chef:
+        prompt += '\nReport the outcome or blocker to the Chef using hc send ' + args.chef + '. This is the verified return address supplied by the launcher.'
+    cmd = ['hc', 'run', '--bg', '--name', args.name, '--cwd', str(target), '--label', 'herdr.space=' + args.space]
+    if args.chef:
+        cmd += ['--parent', args.chef]
+    else:
+        cmd += ['--no-parent']
+    cmd += ['--', 'codex', '--no-daemon']
     if model is not None:
         cmd += ['-m', model]
     if effort is not None:

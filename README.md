@@ -8,14 +8,24 @@ LetThemCook is a lightweight orchestration workflow for Herdr Desktop and Codex.
 - Codex CLI with support for `--no-daemon`.
 - Permission for Git to create worktrees and for `hc` to access Herdr's core. The tools do not bypass sandbox or approval settings.
 
-## Run the Chef and manage work
+## Project Chefs and the registry
 
-Start your main agent in this repository. `AGENTS.md` directs it to the Chef instructions and the local registry. The Chef keeps track of projects without moving their checkouts; it reads each project's own instructions before working there. For agents that do not load `AGENTS.md` automatically, ask them to read it when starting a session.
+Every registered project can have one Chef in its own Herdr Space. The Chef works on that project only, starts Cooks for individual implementation tasks, reviews their reports and closes their terminals after the user accepts the completed task. Worktrees and changes remain available after a Cook is closed.
 
-The registry is a SQLite database created on first use at `.letthemcook/registry.sqlite3`, ignored by Git. Python's standard library supplies SQLite; no server or dependency is needed. Back up that file to preserve the registry. Set `LTC_DB` or pass `--db /path/to/registry.sqlite3` before the subcommand to use another database.
+The registry is a SQLite database created on first use at `.letthemcook/registry.sqlite3`, ignored by Git. Python's standard library supplies SQLite. Back up that file to preserve the registry. Set `LTC_DB` or pass `--db /path/to/registry.sqlite3` before the subcommand to use another database.
+
+Find Space IDs with `herdr-app ls`, then link each project explicitly:
 
 ```sh
-bin/ltc-db project add p0werusers /path/to/p0werusers --description 'Project description'
+bin/ltc-project p0werusers /path/to/p0werusers SPACE_ID
+# For an existing project:
+bin/ltc-db project update p0werusers --space SPACE_ID
+bin/ltc-chef
+```
+
+`ltc-chef` starts a Codex tab named `Chef @ p0werusers` in each registered, open Space. Run it again after opening a Space or registering another project; it leaves an existing tab of that name alone. To sync one project, use `bin/ltc-chef p0werusers`. It reports missing Spaces and does not assume that a Space's displayed name or folder identifies the checkout. It supports local Spaces only. For continuous synchronization while Herdr is open, run `bin/ltc-chef --watch` in a persistent terminal; it checks every 15 seconds (configurable with `--interval`). Start the watcher again after it stops; it is not installed as a login service. An existing same-named tab prevents a duplicate even if its agent has stopped, so the watcher does not automatically restart that agent. Inspect an existing same-named tab before closing it and re-running the command. Agent startup may require interaction in Herdr (for example a trust prompt).
+
+```sh
 bin/ltc-db project list
 bin/ltc-db project show p0werusers
 bin/ltc-db project update p0werusers --path /new/path/to/p0werusers
@@ -27,7 +37,7 @@ bin/ltc-db task update 1 --status in_progress
 bin/ltc-db task update 1 --status done --description 'Outcome and validation'
 ```
 
-Commands return JSON. Project names and checkout paths are unique; paths must point to an existing Git checkout. Task IDs are stable within the database. Statuses are `todo`, `in_progress`, `blocked`, `done`, and `cancelled`. Updating a description replaces it, so include any earlier context you wish to retain. No records or project files are deleted by these commands. Use `--help` on any command for options.
+Commands return JSON. Project names, checkout paths and assigned Space IDs are unique; paths must point to an existing Git checkout. Task IDs are stable within the database. Statuses are `todo`, `in_progress`, `blocked`, `done`, and `cancelled`. Updating a description replaces it, so include earlier context you wish to retain. No records or project files are deleted by these commands. Use `--help` for options.
 
 ## Configure models and prompts
 
@@ -37,21 +47,23 @@ Edit `config.json`: each named profile has a description, `model`, and `reasonin
 "simple": {"description": "Small and well-scoped tasks", "model": "YOUR_MODEL_ID", "reasoning_effort": "low"}
 ```
 
-Edit `prompts/chef.md` and `prompts/cook.md` to change their roles. A separate JSON file passed with `--config` can select other profiles or prompt paths; prompt paths are resolved relative to that config file. The repository `AGENTS.md` points the Chef to its prompt; `prompts.chef` is a configuration reference and is not automatically loaded into an already-running agent. The Cook prompt is loaded from the selected config at launch. These instructions do not override higher-priority instructions or tool permissions.
+Edit `prompts/chef.md` and `prompts/cook.md` to change their roles. A separate JSON file passed with `--config` can select other profiles or prompt paths; prompt paths are resolved relative to that config file. `ltc-chef` loads the default Chef prompt at launch; `prompts.chef` is a configuration reference and is not automatically loaded into an already-running agent. The Cook prompt is loaded from the selected config at launch. These instructions do not override higher-priority instructions or tool permissions.
 
 ## Launch a Cook
 
-Chef finds the project's space ID with `herdr-app ls`, then runs:
+The Chef records a self-contained brief and acceptance criteria in the task description, then launches the Cook from its Herdr terminal:
 
 ```sh
-/path/to/LetThemCook/bin/ltc --project /path/to/project --space SPACE_ID --name task-name --profile simple --task 'Self-contained task, scope, acceptance criteria and checks'
+/path/to/LetThemCook/bin/ltc-cook p0werusers TASK_ID [WORKTREE_NAME] [PROFILE]
 ```
 
-The command creates a detached Git worktree at `/path/to/project/.letthemcook/worktrees/task-name` and launches Codex there in a new Herdr terminal. Names must be unique and use 1–32 lowercase letters, digits, hyphens or underscores. It labels the terminal with the space ID for visibility. Check `herdr-app ls`; if the app did not show the terminal, inspect it by the returned address and use `herdr-app do terminal.keep --terminal ADDRESS --place tab` when appropriate.
+The Bash wrapper reads the project path, Space and brief from the registry (`LTC_DB` selects a non-default database), checks the task belongs to the project, and passes the Chef terminal address to the launcher. The default worktree name is `task-TASK_ID` and the default profile is `default`; choose a new worktree name when retrying an existing one.
+
+The launcher creates a detached Git worktree at `/path/to/project/.letthemcook/worktrees/task-name` and launches Codex there in a new Herdr terminal. Names must be unique and use 1–32 lowercase letters, digits, hyphens or underscores. It labels the terminal with the space ID for visibility. Check `herdr-app ls`; if the app did not show the terminal, inspect it by the returned address and use `herdr-app do terminal.keep --terminal ADDRESS --place tab` when appropriate.
 
 Worktrees start at `HEAD`, or a committed revision specified by `--base`. They **do not include uncommitted files or changes** from the main checkout; the output flags when those exist. Chef must account for them before delegating. The launcher adds `/.letthemcook/` to the local Git `info/exclude`, not the tracked `.gitignore`. It does not install dependencies or copy ignored files. If starting the Cook fails after worktree creation, the path is reported and preserved; inspect it before retrying. Worktrees and changes are never automatically removed.
 
-Use `hc get ADDRESS`, `hc wait ADDRESS --timeout 60` and `hc read ADDRESS --lines 80` to supervise a Cook. A new conversation limits inherited chat context, not access to files or tools allowed by the Cook's sandbox. Cooks can read project instructions and other permitted files. Do not run simultaneous conflicting tasks without coordination.
+The launcher gives the Cook the Chef return address from `HC_TERMINAL_ID` (or `--chef ADDRESS`) so it can report with `hc send`. Check `first_message.sent` in the launch result and inspect the session if delivery failed. Use `hc get ADDRESS`, `hc wait ADDRESS --timeout 60` and `hc read ADDRESS --lines 80` to supervise a Cook. A new conversation limits inherited chat context, not access to files or tools allowed by the Cook's sandbox. Cooks can read project instructions and other permitted files. Do not run simultaneous conflicting tasks without coordination.
 
 ## Delivery
 

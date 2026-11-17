@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Launch a Cook for an existing task in its project's registered Space.
+set -euo pipefail
+if [ "$#" -lt 2 ] || [ "$#" -gt 4 ] || [ "${1:-}" = "--help" ]; then
+  echo "Usage: ltc-cook PROJECT TASK_ID [WORKTREE_NAME] [PROFILE]" >&2
+  exit 2
+fi
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+project="$1"
+task_id="$2"
+case "$task_id" in ''|*[!0-9]*) echo "TASK_ID must be a positive integer" >&2; exit 2;; esac
+if [ -z "${HC_TERMINAL_ID:-}" ]; then
+  echo "Run from the Chef's Herdr terminal so the Cook can report back (HC_TERMINAL_ID is missing)." >&2
+  exit 1
+fi
+project_json="$("$root/bin/ltc-db" project show "$project")"
+task_json="$("$root/bin/ltc-db" task show "$task_id")"
+project_path="$(printf '%s' "$project_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["path"])')"
+space="$(printf '%s' "$project_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["space"] or "")')"
+task_project="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["project"])')"
+if [ "$task_project" != "$project" ]; then
+  echo "Task $task_id belongs to another project: $task_project" >&2
+  exit 1
+fi
+if [ -z "$space" ]; then
+  echo "Project $project has no assigned Herdr Space." >&2
+  exit 1
+fi
+brief="$(printf '%s' "$task_json" | python3 -c 'import json,sys; t=json.load(sys.stdin); print("Task #{}: {}\n\n{}".format(t["id"], t["title"], t["description"]))')"
+name="${3:-task-$task_id}"
+profile="${4:-default}"
+"$root/bin/ltc" --project "$project_path" --space "$space" --name "$name" --profile "$profile" --task "$brief" --chef "$HC_TERMINAL_ID"

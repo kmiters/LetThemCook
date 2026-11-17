@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Start one project Chef in each registered, open Herdr Space."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def run(argv):
+    return subprocess.run(argv, text=True, capture_output=True, check=True).stdout
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--db', default=os.environ.get('LTC_DB', str(ROOT / '.letthemcook' / 'registry.sqlite3')))
+    parser.add_argument('--watch', action='store_true', help='Keep synchronizing open Spaces')
+    parser.add_argument('--interval', type=int, default=15, help='Watch interval in seconds (default: 15)')
+    parser.add_argument('project', nargs='?', help='Only synchronize this project')
+    args = parser.parse_args()
+    if args.interval < 1:
+        parser.error('--interval must be positive')
+    if args.watch:
+        command = [sys.executable, str(Path(__file__).resolve()), '--db', args.db]
+        if args.project:
+            command.append(args.project)
+        try:
+            while True:
+                subprocess.run(command, check=False)
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            return 0
+    registry = [str(ROOT / 'bin' / 'ltc-db'), '--db', args.db, 'project']
+    projects = [json.loads(run(registry + ['show', args.project]))] if args.project else json.loads(run(registry + ['list']))
+    spaces = {s['id']: s for s in json.loads(run(['herdr-app', 'ls']))['spaces']}
+    reports = []
+    failed = False
+    for project in projects:
+        space_id = project['space']
+        report = {'project': project['name'], 'space': space_id}
+        try:
+            if not space_id or space_id not in spaces:
+                raise ValueError('Space is not configured or is not open')
+            space = spaces[space_id]
+            if space.get('machine'):
+                raise ValueError('Remote Spaces are not supported')
+            path = Path(project['path'])
+            if not path.is_dir():
+                raise ValueError('Project checkout is unavailable')
+            name = 'Chef @ ' + project['name']
+            matching = [t for t in space.get('tabs', []) if t.get('name') == name]
+            if matching:
+                report.update(status='already_present', tabs=[t['id'] for t in matching])
+            else:
+                prompt = (ROOT / 'prompts' / 'chef.md').read_text()
+                prompt += ('\n\n# Assigned project\nProject name: ' + project['name'] + '\nCheckout: ' + str(path)
+                           + '\nHerdr Space ID: ' + space_id + '\nRegistry: ' + str(Path(args.db).expanduser().resolve())
+                           + '\nLetThemCook directory: ' + str(ROOT)
+                           + '\nYou are the Chef for this project only. Read the project instructions and await the user.')
+                # The command name is passed separately; the JSON object holds its arguments.
+                output = run(['herdr-app', 'do', 'tab.new', '--name', name, '--space', space_id,
+                              '--folder', str(path), '--argv', json.dumps(['codex', '--no-daemon']), '--task', prompt, '--focus', 'false'])
+                report.update(status='started', result=json.loads(output))
+        except (ValueError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+            report.update(status='error', error=str(error), detail=getattr(error, 'stderr', None))
+            failed = True
+        reports.append(report)
+    print(json.dumps(reports, ensure_ascii=False))
+    return int(failed)
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+        print(f'ltc-chef: {error}', file=sys.stderr)
+        sys.exit(1)
