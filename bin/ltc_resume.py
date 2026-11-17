@@ -100,7 +100,7 @@ def main():
     cmd = ['hc', 'run', '--bg', '--name', name, '--cwd', str(worktree), '--parent', chef,
            '--label', 'herdr.space=' + run['space'], '--label', 'ltc.registry=' + run['token'],
            '--label', 'ltc.run=' + str(new_id), '--label', 'ltc.task=' + str(run['task_id']),
-           '--label', 'ltc.project=' + str(run['project_id']), '--', 'codex', '--no-daemon']
+           '--label', 'ltc.project=' + str(run['project_id']), '--', 'codex', '--no-daemon', '--approve-for-me']
     if model is not None:
         cmd += ['-m', model]
     if effort is not None:

@@ -105,7 +105,7 @@ def main():
         cmd += ['--parent', args.chef]
     else:
         cmd += ['--no-parent']
-    cmd += ['--', 'codex', '--no-daemon']
+    cmd += ['--', 'codex', '--no-daemon', '--approve-for-me']
     if model is not None:
         cmd += ['-m', model]
     if effort is not None:
