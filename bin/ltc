@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ltc_registry import connect, ensure_runs
+from ltc_registry import connect, ensure_runs, terminal_name
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -59,7 +59,7 @@ def main():
             raise ValueError(f'Registry not found: {db_path}')
         conn = connect(db_path)
         ensure_runs(conn)
-        row = conn.execute('SELECT projects.id, projects.path, projects.space FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (args.task_id,)).fetchone()
+        row = conn.execute('SELECT projects.id, projects.path, projects.space, tasks.title FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (args.task_id,)).fetchone()
         if row is None or Path(row[1]).resolve() != project or row[2] != args.space:
             raise ValueError('Task, project checkout and Space do not match the registry')
         cursor = conn.execute('INSERT INTO cook_runs (task_id, project_id, space, worktree, base, hc_session, name, profile, launch_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -95,7 +95,8 @@ def main():
         prompt += '\nRegistry: ' + str(db_path) + '\nLetThemCook directory: ' + str(ROOT)
     if args.chef:
         prompt += '\nReport the outcome or blocker to the Chef using hc send ' + args.chef + '. This is the verified return address supplied by the launcher.'
-    cmd = ['hc', 'run', '--bg', '--name', args.name, '--cwd', str(target), '--label', 'herdr.space=' + args.space]
+    display_name = terminal_name(row[3]) if conn is not None else args.name
+    cmd = ['hc', 'run', '--bg', '--name', display_name, '--cwd', str(target), '--label', 'herdr.space=' + args.space]
     if conn is not None:
         token = conn.execute('SELECT token FROM registry_identity WHERE id = 1').fetchone()[0]
         cmd += ['--label', 'ltc.registry=' + token, '--label', 'ltc.run=' + str(run_id),

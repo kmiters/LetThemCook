@@ -1,6 +1,16 @@
 """Shared SQLite schema for Cook launch records."""
 import sqlite3
+import re
+import unicodedata
 import uuid
+
+
+def terminal_name(title):
+    """Make a readable Herdr name with room for a per-launch unique suffix."""
+    title = title.translate(str.maketrans({'ł': 'l', 'Ł': 'L'}))
+    title = unicodedata.normalize('NFKD', title).encode('ascii', 'ignore').decode().lower()
+    slug = re.sub(r'[^a-z0-9]+', '-', title).strip('-')[:23].rstrip('-') or 'task'
+    return f'{slug}-{uuid.uuid4().hex[:8]}'
 
 
 def ensure_runs(conn):

@@ -61,6 +61,7 @@ else: print(json.dumps({'address':'t-new', 'first_message':{'sent':True}}))
         calls = [json.loads(line) for line in (self.root / 'log').read_text().splitlines()]
         self.assertEqual([c[0] for c in calls], ['get', 'run'])
         self.assertEqual(calls[1][calls[1].index('--cwd') + 1], str(self.worktree))
+        self.assertRegex(calls[1][calls[1].index('--name') + 1], r'^test-task-[a-f0-9]{8}$')
         self.assertIn('ltc.run=2', calls[1])
         self.assertIn('Preserve requirements', calls[1][-1])
         self.assertIn('## User request\nUser wording', calls[1][-1])

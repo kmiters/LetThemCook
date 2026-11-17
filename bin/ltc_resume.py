@@ -5,11 +5,10 @@ import json
 import os
 from pathlib import Path
 
-from ltc_registry import format_task, get_brief
+from ltc_registry import format_task, get_brief, terminal_name
 import sqlite3
 import subprocess
 import sys
-import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -83,7 +82,7 @@ def main():
     current_root = subprocess.run(['git', '-C', str(worktree), 'rev-parse', '--show-toplevel'], capture_output=True, text=True, check=True).stdout.strip()
     if Path(current_root).resolve() != worktree:
         raise ValueError('Recorded worktree is not its own Git root')
-    name = 'resume-' + uuid.uuid4().hex[:20]
+    name = terminal_name(run['title'])
     cur = conn.execute('''INSERT INTO cook_runs (task_id, project_id, space, worktree, base, hc_session, name, profile, launch_state)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'starting')''', (run['task_id'], run['project_id'], run['space'], str(worktree),
         run['base'], run['hc_session'], name, run['profile']))
