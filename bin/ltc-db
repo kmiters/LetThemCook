@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Manage the Chef's local project and task registry."""
+import argparse
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+STATUSES = ('todo', 'in_progress', 'blocked', 'done', 'cancelled')
+
+
+def nonempty(value):
+    if not value.strip():
+        raise argparse.ArgumentTypeError('must not be empty')
+    return value.strip()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--db', default=os.environ.get('LTC_DB', str(ROOT / '.letthemcook' / 'registry.sqlite3')), help='Database path (or LTC_DB)')
+    commands = parser.add_subparsers(dest='command', required=True)
+    project = commands.add_parser('project').add_subparsers(dest='action', required=True)
+    p = project.add_parser('add')
+    p.add_argument('name', type=nonempty)
+    p.add_argument('path', help='Existing Git checkout')
+    p.add_argument('--description', default='')
+    project.add_parser('list')
+    p = project.add_parser('show')
+    p.add_argument('name')
+    p = project.add_parser('update')
+    p.add_argument('name')
+    p.add_argument('--path')
+    p.add_argument('--description')
+    task = commands.add_parser('task').add_subparsers(dest='action', required=True)
+    p = task.add_parser('add')
+    p.add_argument('project')
+    p.add_argument('title', type=nonempty)
+    p.add_argument('--description', default='')
+    p = task.add_parser('list')
+    p.add_argument('--project')
+    p.add_argument('--status', choices=STATUSES)
+    p = task.add_parser('show')
+    p.add_argument('id', type=int)
+    p = task.add_parser('update')
+    p.add_argument('id', type=int)
+    p.add_argument('--title', type=nonempty)
+    p.add_argument('--description')
+    p.add_argument('--status', choices=STATUSES)
+    args = parser.parse_args()
+
+    def checkout(path):
+        result = subprocess.run(['git', '-C', str(Path(path).expanduser()), 'rev-parse', '--show-toplevel'], text=True, capture_output=True, check=True)
+        return str(Path(result.stdout.strip()).resolve())
+
+    db = Path(args.db).expanduser().resolve()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db, timeout=10) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys = ON')
+        conn.executescript('''
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, path TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id),
+            title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo','in_progress','blocked','done','cancelled')),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        ''')
+        def project_id(name):
+            row = conn.execute('SELECT id FROM projects WHERE name = ?', (name,)).fetchone()
+            if row is None:
+                raise ValueError(f'Project not found: {name}')
+            return row['id']
+
+        def task_row(task_id):
+            row = conn.execute('SELECT tasks.*, projects.name AS project FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (task_id,)).fetchone()
+            if row is None:
+                raise ValueError(f'Task not found: {task_id}')
+            return dict(row)
+
+        if args.command == 'project':
+            if args.action == 'add':
+                conn.execute('INSERT INTO projects (name, path, description) VALUES (?, ?, ?)', (args.name, checkout(args.path), args.description))
+                result = dict(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
+            elif args.action == 'list':
+                result = [dict(row) for row in conn.execute('SELECT * FROM projects ORDER BY name')]
+            elif args.action == 'show':
+                project_id(args.name)
+                result = dict(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
+            else:
+                project_id(args.name)
+                updates = {k: getattr(args, k) for k in ('path', 'description') if getattr(args, k) is not None}
+                if not updates:
+                    raise ValueError('Specify --path or --description')
+                if 'path' in updates:
+                    updates['path'] = checkout(updates['path'])
+                conn.execute('UPDATE projects SET ' + ', '.join(k + ' = ?' for k in updates) + ', updated_at = CURRENT_TIMESTAMP WHERE name = ?', (*updates.values(), args.name))
+                result = dict(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
+        elif args.action == 'add':
+            cur = conn.execute('INSERT INTO tasks (project_id, title, description) VALUES (?, ?, ?)', (project_id(args.project), args.title, args.description))
+            result = task_row(cur.lastrowid)
+        elif args.action == 'list':
+            where, values = [], []
+            if args.project:
+                values.append(project_id(args.project))
+                where.append('tasks.project_id = ?')
+            if args.status:
+                values.append(args.status)
+                where.append('tasks.status = ?')
+            query = 'SELECT tasks.*, projects.name AS project FROM tasks JOIN projects ON projects.id = tasks.project_id'
+            result = [dict(row) for row in conn.execute(query + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY tasks.id', values)]
+        elif args.action == 'show':
+            result = task_row(args.id)
+        else:
+            task_row(args.id)
+            updates = {k: getattr(args, k) for k in ('title', 'description', 'status') if getattr(args, k) is not None}
+            if not updates:
+                raise ValueError('Specify --title, --description or --status')
+            conn.execute('UPDATE tasks SET ' + ', '.join(k + ' = ?' for k in updates) + ', updated_at = CURRENT_TIMESTAMP WHERE id = ?', (*updates.values(), args.id))
+            result = task_row(args.id)
+        print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, sqlite3.Error, subprocess.CalledProcessError) as error:
+        print(f'ltc-db: {error}', file=sys.stderr)
+        sys.exit(1)
