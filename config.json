@@ -1,9 +1,24 @@
 {
   "default_profile": "default",
   "profiles": {
-    "default": {"description": "Use the Codex account's default model for ordinary work.", "model": null, "reasoning_effort": null},
-    "simple": {"description": "Small, clearly scoped tasks. Set model to your preferred available model.", "model": null, "reasoning_effort": null},
-    "complex": {"description": "Complex or high-uncertainty tasks. Set model to your preferred available model.", "model": null, "reasoning_effort": null}
+    "default": {
+      "description": "Use the Codex account's default model for ordinary work.",
+      "model": null,
+      "reasoning_effort": null
+    },
+    "simple": {
+      "description": "Small, clearly scoped tasks; uses a faster Codex model.",
+      "model": "gpt-6.2-sol",
+      "reasoning_effort": "low"
+    },
+    "complex": {
+      "description": "Complex or high-uncertainty tasks.",
+      "model": "gpt-6.2-astra",
+      "reasoning_effort": "high"
+    }
   },
-  "prompts": {"chef": "prompts/chef.md", "cook": "prompts/cook.md"}
+  "prompts": {
+    "chef": "prompts/chef.md",
+    "cook": "prompts/cook.md"
+  }
 }

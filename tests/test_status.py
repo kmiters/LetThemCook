@@ -50,6 +50,36 @@ print(json.dumps({'address':t,'state':'live','status':{'state':'working'},'label
             self.assertEqual(runs[2]['terminal_status'], {'state':'unknown', 'reason':'herdr_unavailable_or_terminal_missing'})
             self.assertEqual(runs[2]['worktree'], '/work3')
 
+    def test_default_omits_only_verified_old_finished_runs_and_reports_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / 'db'
+            project = root / 'repo'
+            project.mkdir()
+            subprocess.run(['git', 'init', '-q', str(project)], check=True)
+            env = dict(os.environ, LTC_DB=str(db), PATH=str(root) + os.pathsep + os.environ['PATH'])
+            subprocess.run([str(ROOT / 'bin/ltc-db'), 'project', 'add', 'app', str(project), '--space', 'sp'], env=env, capture_output=True, check=True)
+            subprocess.run([str(ROOT / 'bin/ltc-db'), 'task', 'add', 'app', 'Task'], env=env, capture_output=True, check=True)
+            with sqlite3.connect(db) as conn:
+                env['TOKEN'] = conn.execute('SELECT token FROM registry_identity').fetchone()[0]
+                for i in range(1, 4):
+                    conn.execute("INSERT INTO cook_runs (task_id,project_id,space,worktree,base,terminal,hc_session,name,profile,launch_state) VALUES (1,1,'sp',?,'x',?,'s','n','default','started')", (str(i), 't'+str(i)))
+            hc = root / 'hc'
+            hc.write_text('''#!/usr/bin/env python3
+import json, os, sys
+t = sys.argv[-1]; n = t[1:]
+if n == '2': sys.exit(1)
+print(json.dumps({'address': t, 'state': 'finished', 'labels': {'ltc.registry': os.environ['TOKEN'], 'ltc.run': n, 'ltc.task':'1', 'ltc.project':'1', 'herdr.space':'sp'}}))
+''')
+            hc.chmod(0o755)
+            def status(*args):
+                return json.loads(subprocess.run([str(ROOT / 'bin/ltc-status'), *args, 'app'], env=env, capture_output=True, text=True, check=True).stdout)
+            default, full = status(), status('--all')
+            self.assertEqual([r['id'] for r in default['runs']], [2, 3])
+            self.assertEqual(default['runs'][0]['terminal_status']['state'], 'unknown')
+            self.assertEqual(default['omitted']['runs'], 1)
+            self.assertEqual([r['id'] for r in full['runs']], [1, 2, 3])
+
     def test_missing_registry_is_not_created(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / 'missing.sqlite'

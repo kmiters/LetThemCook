@@ -57,11 +57,22 @@ def get_brief(conn, task_id):
 
 def format_task(task):
     sections = [f"Task #{task['id']}: {task['title']}"]
+    seen = {}
+    def compact(value):
+        if value in seen:
+            reference = f'Same text as {seen[value]} above.'
+            if len(reference) < len(value):
+                return reference
+        return value
     for key, heading in (('intent', 'User request'), ('context', 'Context'), ('scope', 'Scope'),
                          ('acceptance', 'Acceptance criteria'), ('checks', 'Verification')):
         value = (task.get('brief') or {}).get(key, '')
         if value and value.strip():
-            sections.append(f'## {heading}\n{value}')
+            body = compact(value)
+            sections.append(f'## {heading}\n{body}')
+            seen.setdefault(value, heading)
     if task.get('description', '').strip():
-        sections.append('## Additional notes\n' + task['description'])
+        value = task['description']
+        body = compact(value)
+        sections.append('## Additional notes\n' + body)
     return '\n\n'.join(sections)

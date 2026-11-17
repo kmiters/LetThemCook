@@ -36,6 +36,10 @@ def main():
     conn.row_factory = sqlite3.Row
     if args.command == 'close':
         conn.execute('BEGIN IMMEDIATE')
+        conn.execute('''CREATE TABLE IF NOT EXISTS closed_runs (
+            run_id INTEGER PRIMARY KEY REFERENCES cook_runs(id),
+            closed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )''')
     row = conn.execute('''SELECT cook_runs.*, tasks.status AS task_status, projects.path AS project_path, registry_identity.token
         FROM cook_runs JOIN tasks ON tasks.id = cook_runs.task_id
         JOIN projects ON projects.id = cook_runs.project_id AND tasks.project_id = projects.id
@@ -115,6 +119,8 @@ def main():
         if terminal['state'] != 'finished':
             raise ValueError('Terminal state changed; it was not removed')
         subprocess.run(['hc', 'rm', address], env=env, check=True)
+        conn.execute('INSERT INTO closed_runs (run_id) VALUES (?)', (run['id'],))
+        conn.commit()
         print(json.dumps({'closed': run['id'], 'removed_worktree': report['worktree'], 'discarded_changes': bool(args.discard_changes and not report['safe_to_remove'])}))
     conn.close()
     return 0

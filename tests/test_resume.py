@@ -70,6 +70,7 @@ else: print(json.dumps({'address':'t-new', 'first_message':{'sent':True}}))
         self.assertIn('Preserve requirements', calls[1][-1])
         self.assertIn('## User request\nUser wording', calls[1][-1])
         self.assertIn('## Acceptance criteria\nPass criteria', calls[1][-1])
+        self.assertNotIn('task show 1', calls[1][-1])
         with sqlite3.connect(self.db) as conn:
             self.assertEqual(conn.execute('SELECT terminal,launch_state FROM cook_runs WHERE id=2').fetchone(), ('t-new', 'started'))
         again = self.call()
@@ -93,6 +94,18 @@ else: print(json.dumps({'address':'t-new', 'first_message':{'sent':True}}))
         with sqlite3.connect(self.db) as conn:
             conn.execute('UPDATE cook_runs SET worktree=? WHERE id=1', (str(self.project),))
         self.assertNotEqual(self.call().returncode, 0)
+
+    def test_resume_compacts_repeated_sections_without_losing_text(self):
+        shared = 'A long identical requirement that must remain recoverable in both sections.'
+        with sqlite3.connect(self.db) as conn:
+            conn.execute('UPDATE task_briefs SET intent=?, scope=? WHERE task_id=1', (shared, shared))
+        result = self.call()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in (self.root / 'log').read_text().splitlines()]
+        prompt = calls[1][-1]
+        self.assertEqual(prompt.count(shared), 1)
+        self.assertIn('## Scope\nSame text as User request above.', prompt)
+        self.assertIn('## Acceptance criteria\nPass criteria', prompt)
 
 
 if __name__ == '__main__':

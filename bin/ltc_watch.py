@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Watch a project's Cooks and deliver actionable events to its Chef."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
 import json
@@ -141,7 +142,9 @@ def observe_and_deliver(conn, project_id, token):
     runs = [dict(row) for row in conn.execute('''SELECT cook_runs.* FROM cook_runs
         JOIN tasks ON tasks.id = cook_runs.task_id WHERE cook_runs.project_id = ?
         AND tasks.status NOT IN ('done', 'cancelled') ORDER BY cook_runs.id''', (project_id,))]
-    for run in runs:
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        statuses = list(pool.map(lambda run: inspect_run(run, token)['terminal_status'] if run['terminal'] else None, runs))
+    for run, status in zip(runs, statuses):
         if run['launch_state'] in ('failed', 'unknown', 'delivery_failed'):
             launch_state = 'launch_' + run['launch_state']
             previous_launch = conn.execute('SELECT state FROM watch_launch_observations WHERE run_id = ?', (run['id'],)).fetchone()
@@ -152,7 +155,6 @@ def observe_and_deliver(conn, project_id, token):
                 conn.commit()
         if not run['terminal']:
             continue
-        status = inspect_run(run, token)['terminal_status']
         if status['state'] == 'unknown':
             observation = 'unknown:' + status['reason']
         elif status['state'] == 'finished':
@@ -169,7 +171,10 @@ def observe_and_deliver(conn, project_id, token):
                 conn.execute('INSERT INTO watch_events (project_id, run_id, state) VALUES (?, ?, ?)', (project_id, run['id'], observation))
             conn.commit()
     events = conn.execute('SELECT * FROM watch_events WHERE project_id = ? AND delivered = 0 ORDER BY id', (project_id,)).fetchall()
-    for event in events:
+    # Batch a bounded set in one notification. A lost acknowledgement may replay
+    # the whole batch, preserving the existing at-least-once delivery guarantee.
+    for offset in range(0, len(events), 20):
+        batch = events[offset:offset + 20]
         target = conn.execute('SELECT * FROM watch_targets WHERE project_id = ?', (project_id,)).fetchone()
         if not target:
             break
@@ -179,12 +184,13 @@ def observe_and_deliver(conn, project_id, token):
             expected = {'ltc.chef.registry': token, 'ltc.chef.project': str(project_id), 'herdr.space': target['space']}
             if chef.get('address') != target['chef'] or chef.get('state') != 'live' or any(labels.get(k) != v for k, v in expected.items()):
                 break
-            message = (f"Cook event: run {event['run_id']}, {event['state']}. "
-                       f"Check ltc-status and the Cook's report; this event does not confirm task completion.")
+            details = '; '.join(f"run {event['run_id']}, {event['state']}" for event in batch)
+            message = (f"Cook events: {details}. Check ltc-status and the Cook's report; "
+                       "this event does not confirm task completion.")
             call_hc(target['session'], 'send', target['chef'], message, timeout=75)
         except (OSError, ValueError, subprocess.SubprocessError):
             break
-        conn.execute('UPDATE watch_events SET delivered = 1 WHERE id = ?', (event['id'],))
+        conn.executemany('UPDATE watch_events SET delivered = 1 WHERE id = ?', [(event['id'],) for event in batch])
         conn.commit()
 
 

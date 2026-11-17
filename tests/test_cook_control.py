@@ -46,6 +46,9 @@ with log.open('a') as f: f.write(json.dumps({'args':sys.argv[1:], 'session':os.e
 if sys.argv[1] == 'get': print(state.read_text())
 elif sys.argv[1] == 'kill':
     data = json.loads(state.read_text()); data['state'] = 'finished'; state.write_text(json.dumps(data))
+elif sys.argv[1] == 'rm':
+    if os.environ.get('FAIL_RM'): sys.exit(1)
+    state.unlink()
 ''')
         hc.chmod(0o755)
         self.log = self.root / 'log'
@@ -84,6 +87,12 @@ elif sys.argv[1] == 'kill':
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([c['args'][0] for c in self.commands()], ['get', 'kill', 'get', 'get', 'rm'])
         self.assertFalse(self.worktree.exists())
+        status = subprocess.run([str(ROOT / 'bin/ltc-status'), 'app'], env=self.env, text=True, capture_output=True, check=True)
+        self.assertEqual(json.loads(status.stdout)['omitted']['runs'], 1)
+        self.assertEqual(json.loads(status.stdout)['runs'], [])
+        full = subprocess.run([str(ROOT / 'bin/ltc-status'), '--all', 'app'], env=self.env, text=True, capture_output=True, check=True)
+        self.assertEqual(json.loads(full.stdout)['runs'][0]['terminal_status'], {'state':'closed', 'reason':'verified_close'})
+        self.assertEqual([c['args'][0] for c in self.commands()], ['get', 'kill', 'get', 'get', 'rm'])
 
 
     def test_landed_change_can_be_closed(self):
@@ -99,6 +108,20 @@ elif sys.argv[1] == 'kill':
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.worktree.exists())
         self.assertEqual((self.project / 'file').read_text(), 'landed')
+
+    def test_failed_terminal_removal_is_not_recorded_as_closed(self):
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE tasks SET status='done' WHERE id=1")
+        self.env['FAIL_RM'] = '1'
+        self.assertNotEqual(self.call('close', '1').returncode, 0)
+        with sqlite3.connect(self.db) as conn:
+            exists = conn.execute("SELECT 1 FROM sqlite_master WHERE name='closed_runs'").fetchone()
+            if exists:
+                self.assertEqual(conn.execute('SELECT COUNT(*) FROM closed_runs').fetchone()[0], 0)
+        self.assertTrue(self.state.exists())
+        self.state.unlink()
+        status = subprocess.run([str(ROOT / 'bin/ltc-status'), 'app'], env=self.env, text=True, capture_output=True, check=True)
+        self.assertEqual(json.loads(status.stdout)['runs'][0]['terminal_status']['state'], 'unknown')
 
     def test_uncommitted_changes_require_explicit_discard(self):
         (self.worktree / 'file').write_text('unfinished change')

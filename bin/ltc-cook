@@ -1,32 +1,50 @@
-#!/usr/bin/env bash
-# Launch a Cook for an existing task in its project's registered Space.
-set -euo pipefail
-if [ "$#" -lt 2 ] || [ "$#" -gt 4 ] || [ "${1:-}" = "--help" ]; then
-  echo "Usage: ltc-cook PROJECT TASK_ID [WORKTREE_NAME] [PROFILE]" >&2
-  exit 2
-fi
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-project="$1"
-task_id="$2"
-case "$task_id" in ''|*[!0-9]*) echo "TASK_ID must be a positive integer" >&2; exit 2;; esac
-if [ -z "${HC_TERMINAL_ID:-}" ]; then
-  echo "Run from the Chef's Herdr terminal so the Cook can report back (HC_TERMINAL_ID is missing)." >&2
-  exit 1
-fi
-project_json="$("$root/bin/ltc-db" project show "$project")"
-task_json="$("$root/bin/ltc-db" task show "$task_id")"
-project_path="$(printf '%s' "$project_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["path"])')"
-space="$(printf '%s' "$project_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["space"] or "")')"
-task_project="$(printf '%s' "$task_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["project"])')"
-if [ "$task_project" != "$project" ]; then
-  echo "Task $task_id belongs to another project: $task_project" >&2
-  exit 1
-fi
-if [ -z "$space" ]; then
-  echo "Project $project has no assigned Herdr Space." >&2
-  exit 1
-fi
-brief="$(printf '%s' "$task_json" | python3 -c 'import json,sys; sys.path.insert(0, sys.argv[1]); from ltc_registry import format_task; print(format_task(json.load(sys.stdin)))' "$root/bin")"
-name="${3:-task-$task_id}"
-profile="${4:-default}"
-"$root/bin/ltc" --project "$project_path" --space "$space" --name "$name" --profile "$profile" --task "$brief" --chef "$HC_TERMINAL_ID" --task-id "$task_id"
+#!/usr/bin/env python3
+"""Launch a registered task using the current Chef terminal."""
+import os
+from pathlib import Path
+import sqlite3
+import sys
+
+from ltc_registry import format_task, get_brief
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    if not 2 <= len(sys.argv[1:]) <= 4 or sys.argv[1] == '--help':
+        raise ValueError('Usage: ltc-cook PROJECT TASK_ID [WORKTREE_NAME] [PROFILE]')
+    project, task_id = sys.argv[1:3]
+    if not task_id.isascii() or not task_id.isdecimal() or int(task_id) <= 0:
+        raise ValueError('TASK_ID must be a positive integer')
+    chef = os.environ.get('HC_TERMINAL_ID')
+    if not chef:
+        raise ValueError('Run from the Chef Herdr terminal (HC_TERMINAL_ID is missing).')
+    db = Path(os.environ.get('LTC_DB', ROOT / '.letthemcook' / 'registry.sqlite3')).expanduser().resolve()
+    if not db.is_file():
+        raise ValueError('Registry not found')
+    with sqlite3.connect(db.as_uri() + '?mode=ro', uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute('''SELECT tasks.id, tasks.title, tasks.description, projects.name AS project,
+                              projects.path, projects.space FROM tasks JOIN projects ON projects.id = tasks.project_id
+                              WHERE tasks.id = ?''', (int(task_id),)).fetchone()
+        if row is None:
+            raise ValueError('Task not found')
+        task = dict(row)
+        if task['project'] != project:
+            raise ValueError(f'Task {task_id} belongs to another project: {task["project"]}')
+        if not task['space']:
+            raise ValueError(f'Project {project} has no assigned Herdr Space.')
+        task['brief'] = get_brief(conn, int(task_id))
+    name = sys.argv[3] if len(sys.argv) > 3 else 'task-' + task_id
+    profile = sys.argv[4] if len(sys.argv) > 4 else 'default'
+    launcher = str(ROOT / 'bin' / 'ltc')
+    os.execv(launcher, [launcher, '--project', task['path'], '--space', task['space'], '--name', name,
+                       '--profile', profile, '--task', format_task(task), '--chef', chef, '--task-id', task_id])
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, sqlite3.Error, ValueError) as error:
+        print(f'ltc-cook: {error}', file=sys.stderr)
+        sys.exit(1)

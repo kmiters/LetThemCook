@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def inspect_run(run, token):
     result = dict(run)
+    if result.pop('_verified_closed', False):
+        result['terminal_status'] = {'state': 'closed', 'reason': 'verified_close'}
+        return result
     result['terminal_status'] = {'state': 'unknown', 'reason': 'no_recorded_terminal'}
     if not run['terminal']:
         return result
@@ -50,6 +53,7 @@ def inspect_run(run, token):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', default=os.environ.get('LTC_DB', str(ROOT / '.letthemcook' / 'registry.sqlite3')))
+    parser.add_argument('--all', action='store_true', help='Include complete task and run history')
     parser.add_argument('project', help='Registered project name')
     args = parser.parse_args()
     db = Path(args.db).expanduser().resolve()
@@ -68,9 +72,25 @@ def main():
                    WHERE project_id = ? ORDER BY id''', (project['id'],))] if 'cook_runs' in tables else [])
         identity = conn.execute('SELECT token FROM registry_identity WHERE id = 1').fetchone() if 'registry_identity' in tables else None
         token = identity[0] if identity else None
+        closed = {row[0] for row in conn.execute('SELECT run_id FROM closed_runs')} if 'closed_runs' in tables else set()
+        for run in runs:
+            run['_verified_closed'] = run['id'] in closed
     with ThreadPoolExecutor(max_workers=8) as pool:
         inspected = list(pool.map(lambda run: inspect_run(run, token), runs))
-    print(json.dumps({'project': project, 'tasks': tasks, 'runs': inspected}, ensure_ascii=False))
+    if not args.all:
+        latest = {run['task_id']: run['id'] for run in inspected}
+        active = {task['id'] for task in tasks if task['status'] not in ('done', 'cancelled')}
+        # Never suppress uncertainty, live terminals, or launch failures.
+        retained = [run for run in inspected if (run['task_id'] in active and run['id'] == latest[run['task_id']])
+                    or run['terminal_status']['state'] not in ('finished', 'closed')
+                    or run['launch_state'] != 'started']
+        relevant = {run['task_id'] for run in retained}
+        visible_tasks = [task for task in tasks if task['status'] not in ('done', 'cancelled') or task['id'] in relevant]
+        omitted = {'tasks': len(tasks) - len(visible_tasks), 'runs': len(inspected) - len(retained)}
+        tasks, inspected = visible_tasks, retained
+    else:
+        omitted = {'tasks': 0, 'runs': 0}
+    print(json.dumps({'project': project, 'tasks': tasks, 'runs': inspected, 'omitted': omitted}, ensure_ascii=False))
     return 0
 
 

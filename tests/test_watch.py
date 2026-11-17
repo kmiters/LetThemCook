@@ -112,6 +112,33 @@ elif args[0]=='send':
             events = conn.execute('SELECT state FROM watch_events ORDER BY id').fetchall()
         self.assertEqual(events, [('launch_delivery_failed',), ('agent_done',)])
 
+    def test_pending_events_are_batched_and_retried_together(self):
+        self.assertEqual(self.command('start', 'app').returncode, 0)
+        (self.root / 'fail-send').touch()
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE cook_runs SET launch_state='delivery_failed' WHERE id=1")
+        self.update_cook('blocked')
+        self.scan()
+        self.assertEqual(len(self.sends()), 1)
+        self.assertIn('launch_delivery_failed', self.sends()[0][-1])
+        self.assertIn('agent_blocked', self.sends()[0][-1])
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(conn.execute('SELECT delivered FROM watch_events ORDER BY id').fetchall(), [(0,), (0,)])
+        (self.root / 'fail-send').unlink()
+        self.scan()
+        self.assertEqual(len(self.sends()), 2)
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(conn.execute('SELECT delivered FROM watch_events ORDER BY id').fetchall(), [(1,), (1,)])
+
+    def test_direct_report_does_not_suppress_unverified_done_signal(self):
+        self.assertEqual(self.command('start', 'app').returncode, 0)
+        subprocess.run(['hc', 'send', 't-chef', 'Cook report'], env=self.env, check=True)
+        self.update_cook('done')
+        self.scan()
+        self.assertEqual(len(self.sends()), 2)
+        self.assertEqual(self.sends()[0][-1], 'Cook report')
+        self.assertIn('agent_done', self.sends()[1][-1])
+
 
 if __name__ == '__main__':
     unittest.main()
