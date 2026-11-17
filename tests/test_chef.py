@@ -37,11 +37,15 @@ else:
             first = subprocess.run(cmd, env=env, text=True, capture_output=True, check=True)
             self.assertEqual(json.loads(first.stdout)[0]['status'], 'started')
             args = json.loads((root / 'args').read_text())
-            self.assertEqual(args[args.index('--name') + 1], 'Chef @ app')
+            self.assertEqual(args[args.index('--name') + 1], '👨‍🍳 Chef @ app')
+            self.assertEqual(json.loads(args[args.index('--argv') + 1]), ['codex', '--no-daemon', '--approve-for-me'])
             self.assertEqual(args[args.index('--space') + 1], 'sp1')
             self.assertEqual(args[args.index('--folder') + 1], str(project.resolve()))
             second = subprocess.run(cmd, env=env, text=True, capture_output=True, check=True)
             self.assertEqual(json.loads(second.stdout)[0]['status'], 'already_present')
+            (root / 'tabs').write_text(json.dumps([{'id': 'legacy', 'name': 'Chef @ app'}]))
+            legacy = subprocess.run(cmd, env=env, text=True, capture_output=True, check=True)
+            self.assertEqual(json.loads(legacy.stdout)[0], {'project': 'app', 'space': 'sp1', 'status': 'already_present', 'tabs': ['legacy']})
 
     def test_old_database_is_migrated(self):
         import sqlite3

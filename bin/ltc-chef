@@ -51,8 +51,10 @@ def main():
             path = Path(project['path'])
             if not path.is_dir():
                 raise ValueError('Project checkout is unavailable')
-            name = 'Chef @ ' + project['name']
-            matching = [t for t in space.get('tabs', []) if t.get('name') == name]
+            name = '👨‍🍳 Chef @ ' + project['name']
+            # Existing Chefs keep running under the old name during migration.
+            legacy_name = 'Chef @ ' + project['name']
+            matching = [t for t in space.get('tabs', []) if t.get('name') in (name, legacy_name)]
             if matching:
                 report.update(status='already_present', tabs=[t['id'] for t in matching])
             else:
@@ -63,7 +65,7 @@ def main():
                            + '\nYou are the Chef for this project only. Read the project instructions and await the user.')
                 # The command name is passed separately; the JSON object holds its arguments.
                 output = run(['herdr-app', 'do', 'tab.new', '--name', name, '--space', space_id,
-                              '--folder', str(path), '--argv', json.dumps(['codex', '--no-daemon']), '--task', prompt, '--focus', 'false'])
+                              '--folder', str(path), '--argv', json.dumps(['codex', '--no-daemon', '--approve-for-me']), '--task', prompt, '--focus', 'false'])
                 report.update(status='started', result=json.loads(output))
         except (ValueError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
             report.update(status='error', error=str(error), detail=getattr(error, 'stderr', None))
