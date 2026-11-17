@@ -8,6 +8,8 @@ import sqlite3
 import subprocess
 import sys
 
+from ltc_registry import BRIEF_FIELDS, ensure_briefs, ensure_runs, get_brief
+
 ROOT = Path(__file__).resolve().parent.parent
 STATUSES = ('todo', 'in_progress', 'blocked', 'done', 'cancelled')
 
@@ -41,6 +43,8 @@ def main():
     p.add_argument('project')
     p.add_argument('title', type=nonempty)
     p.add_argument('--description', default='')
+    for field in BRIEF_FIELDS:
+        p.add_argument('--' + field)
     p = task.add_parser('list')
     p.add_argument('--project')
     p.add_argument('--status', choices=STATUSES)
@@ -51,6 +55,14 @@ def main():
     p.add_argument('--title', type=nonempty)
     p.add_argument('--description')
     p.add_argument('--status', choices=STATUSES)
+    for field in BRIEF_FIELDS:
+        p.add_argument('--' + field)
+    runs = commands.add_parser('run').add_subparsers(dest='action', required=True)
+    p = runs.add_parser('list')
+    p.add_argument('--project')
+    p.add_argument('--task', type=int)
+    p = runs.add_parser('show')
+    p.add_argument('id', type=int)
     args = parser.parse_args()
 
     def checkout(path):
@@ -79,6 +91,8 @@ def main():
         if 'space' not in columns:
             conn.execute('ALTER TABLE projects ADD COLUMN space TEXT')
         conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS projects_space ON projects(space)')
+        ensure_runs(conn)
+        ensure_briefs(conn)
 
         def project_id(name):
             row = conn.execute('SELECT id FROM projects WHERE name = ?', (name,)).fetchone()
@@ -90,7 +104,15 @@ def main():
             row = conn.execute('SELECT tasks.*, projects.name AS project FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (task_id,)).fetchone()
             if row is None:
                 raise ValueError(f'Task not found: {task_id}')
-            return dict(row)
+            task = dict(row)
+            task['brief'] = get_brief(conn, task_id)
+            return task
+
+        def update_brief(task_id, fields):
+            if not fields:
+                return
+            conn.execute('INSERT OR IGNORE INTO task_briefs (task_id) VALUES (?)', (task_id,))
+            conn.execute('UPDATE task_briefs SET ' + ', '.join(key + ' = ?' for key in fields) + ' WHERE task_id = ?', (*fields.values(), task_id))
 
         if args.command == 'project':
             if args.action == 'add':
@@ -112,8 +134,26 @@ def main():
                     updates['space'] = nonempty(updates['space'])
                 conn.execute('UPDATE projects SET ' + ', '.join(k + ' = ?' for k in updates) + ', updated_at = CURRENT_TIMESTAMP WHERE name = ?', (*updates.values(), args.name))
                 result = dict(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
+        elif args.command == 'run':
+            query = 'SELECT cook_runs.*, projects.name AS project FROM cook_runs JOIN projects ON projects.id = cook_runs.project_id'
+            if args.action == 'show':
+                row = conn.execute(query + ' WHERE cook_runs.id = ?', (args.id,)).fetchone()
+                if row is None:
+                    raise ValueError(f'Run not found: {args.id}')
+                result = dict(row)
+            else:
+                where, values = [], []
+                if args.project:
+                    where.append('cook_runs.project_id = ?')
+                    values.append(project_id(args.project))
+                if args.task is not None:
+                    task_row(args.task)
+                    where.append('cook_runs.task_id = ?')
+                    values.append(args.task)
+                result = [dict(row) for row in conn.execute(query + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY cook_runs.id', values)]
         elif args.action == 'add':
             cur = conn.execute('INSERT INTO tasks (project_id, title, description) VALUES (?, ?, ?)', (project_id(args.project), args.title, args.description))
+            update_brief(cur.lastrowid, {key: getattr(args, key) for key in BRIEF_FIELDS if getattr(args, key) is not None})
             result = task_row(cur.lastrowid)
         elif args.action == 'list':
             where, values = [], []
@@ -130,9 +170,12 @@ def main():
         else:
             task_row(args.id)
             updates = {k: getattr(args, k) for k in ('title', 'description', 'status') if getattr(args, k) is not None}
-            if not updates:
-                raise ValueError('Specify --title, --description or --status')
-            conn.execute('UPDATE tasks SET ' + ', '.join(k + ' = ?' for k in updates) + ', updated_at = CURRENT_TIMESTAMP WHERE id = ?', (*updates.values(), args.id))
+            brief_updates = {key: getattr(args, key) for key in BRIEF_FIELDS if getattr(args, key) is not None}
+            if not updates and not brief_updates:
+                raise ValueError('Specify a task or brief field to update')
+            assignment = ', '.join(k + ' = ?' for k in updates)
+            conn.execute('UPDATE tasks SET ' + (assignment + ', ' if assignment else '') + 'updated_at = CURRENT_TIMESTAMP WHERE id = ?', (*updates.values(), args.id))
+            update_brief(args.id, brief_updates)
             result = task_row(args.id)
         print(json.dumps(result, ensure_ascii=False))
     return 0

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Send a message to, or close, a verified Cook terminal.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+exec python3 "$root/bin/ltc_cook_control.py" "$@"

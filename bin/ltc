@@ -4,9 +4,12 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+
+from ltc_registry import connect, ensure_runs
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -24,6 +27,8 @@ def main():
     parser.add_argument('--task', required=True, help='Self-contained task brief')
     parser.add_argument('--base', default='HEAD', help='Committed base (default: HEAD)')
     parser.add_argument('--chef', default=os.environ.get('HC_TERMINAL_ID'), help='Chef terminal address for Cook reports (defaults to HC_TERMINAL_ID)')
+    parser.add_argument('--task-id', type=int, help='Registry task ID for recording this launch')
+    parser.add_argument('--db', default=os.environ.get('LTC_DB', str(ROOT / '.letthemcook' / 'registry.sqlite3')), help='Registry database')
     parser.add_argument('--config', default=str(ROOT / 'config.json'), help='JSON configuration')
     args = parser.parse_args()
     if not re.fullmatch(r'[a-z0-9_-]{1,32}', args.name) or not re.fullmatch(r'[a-zA-Z0-9_-]+', args.space) or not args.task.strip():
@@ -46,23 +51,55 @@ def main():
         raise ValueError(f'Worktree already exists: {target}; inspect it instead of retrying')
     changes = run(['git', '-C', str(project), 'status', '--porcelain']).stdout
 
+    conn = None
+    run_id = None
+    if args.task_id is not None:
+        db_path = Path(args.db).expanduser().resolve()
+        if not db_path.is_file():
+            raise ValueError(f'Registry not found: {db_path}')
+        conn = connect(db_path)
+        ensure_runs(conn)
+        row = conn.execute('SELECT projects.id, projects.path, projects.space FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (args.task_id,)).fetchone()
+        if row is None or Path(row[1]).resolve() != project or row[2] != args.space:
+            raise ValueError('Task, project checkout and Space do not match the registry')
+        cursor = conn.execute('INSERT INTO cook_runs (task_id, project_id, space, worktree, base, hc_session, name, profile, launch_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                              (args.task_id, row[0], args.space, str(target), base, os.environ.get('HC_SESSION') or 'default', args.name, profile_name, 'starting'))
+        run_id = cursor.lastrowid
+        conn.commit()
+
+    def record(state, terminal=None, detail=None):
+        if conn is not None:
+            conn.execute('UPDATE cook_runs SET launch_state = ?, terminal = ?, detail = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (state, terminal, detail, run_id))
+            conn.commit()
+
     # Local exclude keeps all nested worktrees out of the main project's Git status.
-    exclude = Path(run(['git', '-C', str(project), 'rev-parse', '--git-path', 'info/exclude']).stdout.strip())
-    if not exclude.is_absolute():
-        exclude = project / exclude
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    existing = exclude.read_text() if exclude.exists() else ''
-    rule = '/.letthemcook/'
-    if rule not in existing.splitlines():
-        with exclude.open('a') as file:
-            file.write(('\n' if existing and not existing.endswith('\n') else '') + rule + '\n')
-    target.parent.mkdir(parents=True, exist_ok=True)
-    run(['git', '-C', str(project), 'worktree', 'add', '--detach', str(target), base])
+    try:
+        exclude = Path(run(['git', '-C', str(project), 'rev-parse', '--git-path', 'info/exclude']).stdout.strip())
+        if not exclude.is_absolute():
+            exclude = project / exclude
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude.read_text() if exclude.exists() else ''
+        rule = '/.letthemcook/'
+        if rule not in existing.splitlines():
+            with exclude.open('a') as file:
+                file.write(('\n' if existing and not existing.endswith('\n') else '') + rule + '\n')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        run(['git', '-C', str(project), 'worktree', 'add', '--detach', str(target), base])
+
+    except (OSError, subprocess.CalledProcessError) as error:
+        record('failed', detail=str(error))
+        raise
 
     prompt = cook_prompt + '\n\n# Task\n' + args.task + '\n\nYour worktree: ' + str(target)
+    if conn is not None:
+        prompt += '\nRegistry: ' + str(db_path) + '\nLetThemCook directory: ' + str(ROOT)
     if args.chef:
         prompt += '\nReport the outcome or blocker to the Chef using hc send ' + args.chef + '. This is the verified return address supplied by the launcher.'
     cmd = ['hc', 'run', '--bg', '--name', args.name, '--cwd', str(target), '--label', 'herdr.space=' + args.space]
+    if conn is not None:
+        token = conn.execute('SELECT token FROM registry_identity WHERE id = 1').fetchone()[0]
+        cmd += ['--label', 'ltc.registry=' + token, '--label', 'ltc.run=' + str(run_id),
+                '--label', 'ltc.task=' + str(args.task_id), '--label', 'ltc.project=' + str(row[0])]
     if args.chef:
         cmd += ['--parent', args.chef]
     else:
@@ -76,15 +113,32 @@ def main():
     try:
         launched = run(cmd)
     except (subprocess.CalledProcessError, OSError) as error:
-        print(json.dumps({'error': 'launch_failed', 'worktree': str(target), 'base': base, 'detail': str(error), 'stderr': getattr(error, 'stderr', None)}), file=sys.stderr)
+        state = 'failed' if isinstance(error, FileNotFoundError) else 'unknown'
+        record(state, detail=str(error))
+        print(json.dumps({'error': 'launch_failed', 'run_id': run_id, 'worktree': str(target), 'base': base, 'detail': str(error), 'stderr': getattr(error, 'stderr', None)}), file=sys.stderr)
         return 1
-    print(json.dumps({'worktree': str(target), 'base': base, 'profile': profile_name, 'model': model, 'reasoning_effort': effort, 'uncommitted_changes_excluded': bool(changes), 'herdr': json.loads(launched.stdout)}))
+    try:
+        herdr = json.loads(launched.stdout)
+        if not isinstance(herdr, dict) or not isinstance(herdr.get('address'), str) or not herdr['address']:
+            raise ValueError('Launch response has no terminal address')
+    except (ValueError, TypeError) as error:
+        record('unknown', detail=str(error))
+        print(json.dumps({'error': 'launch_response_unknown', 'run_id': run_id, 'worktree': str(target), 'detail': str(error), 'response': launched.stdout}), file=sys.stderr)
+        return 1
+    first_message = herdr.get('first_message')
+    state = 'delivery_failed' if isinstance(first_message, dict) and first_message.get('sent') is False else 'started'
+    try:
+        record(state, terminal=herdr['address'], detail=json.dumps(first_message) if first_message is not None else None)
+    except sqlite3.Error as error:
+        print(json.dumps({'error': 'registry_update_failed', 'run_id': run_id, 'worktree': str(target), 'herdr': herdr, 'detail': str(error)}), file=sys.stderr)
+        return 1
+    print(json.dumps({'run_id': run_id, 'worktree': str(target), 'base': base, 'profile': profile_name, 'model': model, 'reasoning_effort': effort, 'uncommitted_changes_excluded': bool(changes), 'herdr': herdr}))
     return 0
 
 
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as error:
+    except (OSError, KeyError, ValueError, sqlite3.Error, subprocess.CalledProcessError) as error:
         print(f'ltc: {error}', file=sys.stderr)
         sys.exit(1)

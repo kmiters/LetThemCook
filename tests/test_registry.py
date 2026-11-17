@@ -48,6 +48,17 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(self.call('task', 'list'), [])
         self.assertEqual(len(self.call('project', 'list')), 1)
 
+    def test_structured_brief_can_be_edited_field_by_field(self):
+        self.call('project', 'add', 'app', str(self.project))
+        task = self.call('task', 'add', 'app', 'Feature', '--intent', 'User wording', '--context', 'Background', '--scope', 'Only this', '--acceptance', 'User can save', '--checks', 'Run suite')
+        self.assertEqual(task['brief'], {'intent': 'User wording', 'context': 'Background', 'scope': 'Only this', 'acceptance': 'User can save', 'checks': 'Run suite'})
+        task = self.call('task', 'update', str(task['id']), '--checks', 'Run focused tests')
+        self.assertEqual(task['brief']['intent'], 'User wording')
+        self.assertEqual(task['brief']['checks'], 'Run focused tests')
+        self.assertEqual(self.call('task', 'show', str(task['id']))['brief'], task['brief'])
+        task = self.call('task', 'update', str(task['id']), '--scope', '')
+        self.assertEqual(task['brief']['scope'], '')
+
     def test_environment_override(self):
         env = dict(os.environ, LTC_DB=str(self.db))
         result = subprocess.run([str(REGISTRY), 'project', 'list'], env=env, capture_output=True, text=True, check=True)

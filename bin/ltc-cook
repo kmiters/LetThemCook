@@ -26,7 +26,7 @@ if [ -z "$space" ]; then
   echo "Project $project has no assigned Herdr Space." >&2
   exit 1
 fi
-brief="$(printf '%s' "$task_json" | python3 -c 'import json,sys; t=json.load(sys.stdin); print("Task #{}: {}\n\n{}".format(t["id"], t["title"], t["description"]))')"
+brief="$(printf '%s' "$task_json" | python3 -c 'import json,sys; sys.path.insert(0, sys.argv[1]); from ltc_registry import format_task; print(format_task(json.load(sys.stdin)))' "$root/bin")"
 name="${3:-task-$task_id}"
 profile="${4:-default}"
-"$root/bin/ltc" --project "$project_path" --space "$space" --name "$name" --profile "$profile" --task "$brief" --chef "$HC_TERMINAL_ID"
+"$root/bin/ltc" --project "$project_path" --space "$space" --name "$name" --profile "$profile" --task "$brief" --chef "$HC_TERMINAL_ID" --task-id "$task_id"

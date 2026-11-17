@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Start or run the model-free Cook supervisor.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+exec python3 "$root/bin/ltc_watch.py" "$@"

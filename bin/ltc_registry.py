@@ -1,0 +1,57 @@
+"""Shared SQLite schema for Cook launch records."""
+import sqlite3
+import uuid
+
+
+def ensure_runs(conn):
+    conn.execute('CREATE TABLE IF NOT EXISTS registry_identity (id INTEGER PRIMARY KEY CHECK(id = 1), token TEXT NOT NULL)')
+    conn.execute('INSERT OR IGNORE INTO registry_identity (id, token) VALUES (1, ?)', (uuid.uuid4().hex,))
+    conn.execute('''CREATE TABLE IF NOT EXISTS cook_runs (
+        id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
+        project_id INTEGER NOT NULL REFERENCES projects(id), space TEXT NOT NULL,
+        worktree TEXT NOT NULL, base TEXT NOT NULL, terminal TEXT,
+        hc_session TEXT NOT NULL, name TEXT NOT NULL, profile TEXT NOT NULL,
+        launch_state TEXT NOT NULL CHECK(launch_state IN
+          ('starting', 'started', 'delivery_failed', 'failed', 'unknown')),
+        detail TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS cook_runs_task_id ON cook_runs(task_id, id)')
+
+
+def connect(path):
+    conn = sqlite3.connect(path, timeout=10)
+    conn.execute('PRAGMA foreign_keys = ON')
+    return conn
+
+
+BRIEF_FIELDS = ('intent', 'context', 'scope', 'acceptance', 'checks')
+
+
+def ensure_briefs(conn):
+    conn.execute('''CREATE TABLE IF NOT EXISTS task_briefs (
+        task_id INTEGER PRIMARY KEY REFERENCES tasks(id),
+        intent TEXT NOT NULL DEFAULT '', context TEXT NOT NULL DEFAULT '',
+        scope TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
+        checks TEXT NOT NULL DEFAULT ''
+    )''')
+
+
+def get_brief(conn, task_id):
+    exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_briefs'").fetchone()
+    if not exists:
+        return None
+    row = conn.execute('SELECT intent, context, scope, acceptance, checks FROM task_briefs WHERE task_id = ?', (task_id,)).fetchone()
+    return dict(zip(BRIEF_FIELDS, row)) if row else None
+
+
+def format_task(task):
+    sections = [f"Task #{task['id']}: {task['title']}"]
+    for key, heading in (('intent', 'User request'), ('context', 'Context'), ('scope', 'Scope'),
+                         ('acceptance', 'Acceptance criteria'), ('checks', 'Verification')):
+        value = (task.get('brief') or {}).get(key, '')
+        if value and value.strip():
+            sections.append(f'## {heading}\n{value}')
+    if task.get('description', '').strip():
+        sections.append('## Additional notes\n' + task['description'])
+    return '\n\n'.join(sections)
