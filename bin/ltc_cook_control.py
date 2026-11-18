@@ -103,45 +103,64 @@ def main():
             report['member'] = member['name']
         print(json.dumps(report, ensure_ascii=False))
     else:
-        native_status = terminal.get('status')
-        if terminal['state'] == 'live' and isinstance(native_status, dict) and native_status.get('state') in ('working', 'blocked'):
-            raise ValueError('Cook is working or blocked; inspect it before closing')
-        for sibling in siblings:
-            if not sibling['terminal'] and sibling['launch_state'] == 'failed':
-                continue
-            if checked_terminal(sibling)['state'] != 'finished':
-                raise ValueError('Another Cook for this worktree is still live; no action taken')
-        report = inspect(checkout, run['worktree'], run['base'])
-        if not report['safe_to_remove'] and not args.discard_changes:
-            print(json.dumps({'error': 'work_not_confirmed_on_main', 'report': report}, ensure_ascii=False), file=sys.stderr)
-            return 1
-        if terminal['state'] == 'live':
-            subprocess.run(['hc', 'kill', address], env=env, check=True)
-            terminal = checked_terminal(run)
-            if terminal['state'] != 'finished':
-                raise ValueError('Cook terminal did not finish; worktree was not removed')
-        report = inspect(checkout, run['worktree'], run['base'])
-        if not report['safe_to_remove'] and not args.discard_changes:
-            print(json.dumps({'error': 'work_changed_during_close', 'report': report}, ensure_ascii=False), file=sys.stderr)
-            return 1
-        for sibling in siblings:
-            if not sibling['terminal'] and sibling['launch_state'] == 'failed':
-                continue
-            if checked_terminal(sibling)['state'] != 'finished':
-                raise ValueError('Another Cook for this worktree is still live; worktree was not removed')
-        remove = ['git', '-C', report['project'], 'worktree', 'remove']
-        if args.discard_changes and not report['safe_to_remove']:
-            remove.append('--force')
-        remove += ['--', report['worktree']]
-        subprocess.run(remove, check=True)
+        conn.execute('''CREATE TABLE IF NOT EXISTS pending_closes (
+            worktree TEXT PRIMARY KEY, run_id INTEGER NOT NULL, identity TEXT NOT NULL,
+            last_run_id INTEGER NOT NULL, discarded INTEGER NOT NULL)''')
+        identity = json.dumps([run[k] for k in ('id', 'task_id', 'project_id', 'space', 'token',
+                                                 'hc_session', 'terminal', 'base')] + [run.get('member_id'), checkout])
+        pending = conn.execute('SELECT * FROM pending_closes WHERE worktree=?', (run['worktree'],)).fetchone()
+        if pending:
+            if pending['identity'] != identity or terminal['state'] != 'finished':
+                raise ValueError('Pending close belongs to a different run identity or terminal state')
+            last_run, discarded = pending['last_run_id'], bool(pending['discarded'])
+        else:
+            native_status = terminal.get('status')
+            if terminal['state'] == 'live' and isinstance(native_status, dict) and native_status.get('state') in ('working', 'blocked'):
+                raise ValueError('Cook is working or blocked; inspect it before closing')
+            for sibling in siblings:
+                if not sibling['terminal'] and sibling['launch_state'] == 'failed':
+                    continue
+                if checked_terminal(sibling)['state'] != 'finished':
+                    raise ValueError('Another Cook for this worktree is still live; no action taken')
+            report = inspect(checkout, run['worktree'], run['base'])
+            if not report['safe_to_remove'] and not args.discard_changes:
+                print(json.dumps({'error': 'work_not_confirmed_on_main', 'report': report}, ensure_ascii=False), file=sys.stderr)
+                return 1
+            if terminal['state'] == 'live':
+                subprocess.run(['hc', 'kill', address], env=env, check=True)
+                terminal = checked_terminal(run)
+                if terminal['state'] != 'finished':
+                    raise ValueError('Cook terminal did not finish; worktree was not removed')
+            report = inspect(checkout, run['worktree'], run['base'])
+            if not report['safe_to_remove'] and not args.discard_changes:
+                print(json.dumps({'error': 'work_changed_during_close', 'report': report}, ensure_ascii=False), file=sys.stderr)
+                return 1
+            for sibling in siblings:
+                if not sibling['terminal'] and sibling['launch_state'] == 'failed':
+                    continue
+                if checked_terminal(sibling)['state'] != 'finished':
+                    raise ValueError('Another Cook for this worktree is still live; worktree was not removed')
+            remove = ['git', '-C', report['project'], 'worktree', 'remove']
+            if args.discard_changes and not report['safe_to_remove']:
+                remove.append('--force')
+            remove += ['--', report['worktree']]
+            subprocess.run(remove, check=True)
+            last_run = max([run['id'], *(item['id'] for item in siblings)])
+            discarded = bool(args.discard_changes and not report['safe_to_remove'])
+            conn.execute('INSERT INTO pending_closes VALUES (?,?,?,?,?)',
+                         (run['worktree'], run['id'], identity, last_run, discarded))
+            conn.commit()
+            conn.execute('BEGIN IMMEDIATE')
+        # Only the exact, previously verified terminal remains to remove. Do
+        # not inspect, kill, or remove a checkout newly created at the same path.
         terminal = checked_terminal(run)
         if terminal['state'] != 'finished':
             raise ValueError('Terminal state changed; it was not removed')
         subprocess.run(['hc', 'rm', address], env=env, check=True)
-        last_run = max([run['id'], *(item['id'] for item in siblings)])
+        conn.execute('DELETE FROM pending_closes WHERE run_id=?', (run['id'],))
         conn.execute('INSERT INTO closed_runs (run_id,last_run_id) VALUES (?,?)', (run['id'], last_run))
         conn.commit()
-        print(json.dumps({'closed': run['id'], 'removed_worktree': report['worktree'], 'discarded_changes': bool(args.discard_changes and not report['safe_to_remove'])}))
+        print(json.dumps({'closed': run['id'], 'removed_worktree': run['worktree'], 'discarded_changes': discarded}))
     conn.close()
     return 0
 

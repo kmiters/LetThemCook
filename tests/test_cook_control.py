@@ -140,6 +140,24 @@ elif sys.argv[1] == 'rm':
         status = subprocess.run([str(ROOT / 'bin/ltc-status'), 'app'], env=self.env, text=True, capture_output=True, check=True)
         self.assertEqual(json.loads(status.stdout)['runs'][0]['terminal_status']['state'], 'unknown')
 
+    def test_retry_finishes_only_verified_terminal_after_worktree_removal(self):
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE tasks SET status='done'")
+        self.env['FAIL_RM'] = '1'
+        self.assertNotEqual(self.call('close', '1').returncode, 0)
+        self.assertFalse(self.worktree.exists())
+        self.worktree.mkdir()
+        (self.worktree / 'new').write_text('preserve')
+        del self.env['FAIL_RM']
+        original = self.state.read_text()
+        self.state.write_text(json.dumps({'address': 't1', 'state': 'finished', 'labels': {}}))
+        self.assertNotEqual(self.call('close', '1').returncode, 0)
+        self.state.write_text(original)
+        result = self.call('close', '1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.worktree / 'new').read_text(), 'preserve')
+        self.assertFalse(self.state.exists())
+
     def test_uncommitted_changes_require_explicit_discard(self):
         (self.worktree / 'file').write_text('unfinished change')
         with sqlite3.connect(self.db) as conn:
