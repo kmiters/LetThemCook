@@ -89,6 +89,23 @@ elif args[0]=='send':
         self.assertEqual(len(self.sends()), 3)
         self.assertTrue(all('does not confirm task completion' in c[-1] for c in self.sends()))
 
+    def test_stale_start_is_unknown_and_notified_once(self):
+        self.assertEqual(self.command('start', 'app').returncode, 0)
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE cook_runs SET launch_state='starting', terminal=NULL")
+        self.scan()
+        self.assertEqual(self.sends(), [])
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE cook_runs SET created_at=datetime('now','-6 minutes')")
+        self.scan()
+        self.scan()
+        self.assertEqual(len(self.sends()), 1)
+        self.assertIn('stale_start_without_terminal', self.sends()[0][-1])
+        status = subprocess.check_output([ROOT / 'bin/ltc-status', 'app'], env=self.env)
+        run = json.loads(status)['runs'][0]
+        self.assertEqual(run['launch_state'], 'starting')
+        self.assertEqual(run['terminal_status'], {'state': 'unknown', 'reason': 'stale_start_without_terminal'})
+
     def test_relocation_waits_for_chef_in_new_space(self):
         self.assertEqual(self.command('start', 'app').returncode, 0)
         with sqlite3.connect(self.db) as conn:

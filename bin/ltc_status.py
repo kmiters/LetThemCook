@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read one project's task registry and inspect recorded Herdr terminals."""
 import argparse
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -30,6 +31,16 @@ def terminal_env(run):
     return env
 
 
+def stale_start(run):
+    if run['launch_state'] != 'starting' or run['terminal']:
+        return False
+    try:
+        started = datetime.fromisoformat(run['created_at']).replace(tzinfo=timezone.utc)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return datetime.now(timezone.utc) - started >= timedelta(minutes=5)
+
+
 def inspect_terminal(run, token):
     """Return status and terminal metadata only when the terminal identity matches."""
     if run.get('_member_mismatch'):
@@ -37,7 +48,8 @@ def inspect_terminal(run, token):
     if run.get('_verified_closed'):
         return {'state': 'closed', 'reason': 'verified_close'}, None
     if not run['terminal']:
-        return {'state': 'unknown', 'reason': 'no_recorded_terminal'}, None
+        reason = 'stale_start_without_terminal' if stale_start(run) else 'no_recorded_terminal'
+        return {'state': 'unknown', 'reason': reason}, None
     if not token:
         return {'state': 'unknown', 'reason': 'no_registry_identity'}, None
     try:

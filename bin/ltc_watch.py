@@ -13,7 +13,7 @@ import sys
 import time
 
 from ltc_endpoint import verified_chef
-from ltc_status import inspect_run
+from ltc_status import inspect_run, stale_start
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -146,8 +146,12 @@ def observe_and_deliver(conn, project_id, token):
     with ThreadPoolExecutor(max_workers=8) as pool:
         statuses = list(pool.map(lambda run: inspect_run(run, token)['terminal_status'] if run['terminal'] else None, runs))
     for run, status in zip(runs, statuses):
-        if run['launch_state'] in ('failed', 'unknown', 'delivery_failed'):
+        launch_state = None
+        if stale_start(run):
+            launch_state = 'stale_start_without_terminal'
+        elif run['launch_state'] in ('failed', 'unknown', 'delivery_failed'):
             launch_state = 'launch_' + run['launch_state']
+        if launch_state:
             previous_launch = conn.execute('SELECT state FROM watch_launch_observations WHERE run_id = ?', (run['id'],)).fetchone()
             if previous_launch is None or previous_launch['state'] != launch_state:
                 conn.execute('''INSERT INTO watch_launch_observations (run_id, state) VALUES (?, ?)
