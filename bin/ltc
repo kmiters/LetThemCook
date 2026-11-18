@@ -8,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from uuid import uuid4
 from pathlib import Path
 
 from ltc_endpoint import verify_callback
@@ -82,10 +83,11 @@ def main():
         raise ValueError('A Chef callback requires a registered --task-id')
     if args.chef:
         prompt += '\nSave results with ltc-report. Send questions to the Chef using hc send ' + args.chef + '. This is the verified return address supplied by the launcher.'
-    harness_cmd = route.command(prompt)
+    session_id = str(uuid4()) if conn is not None and route.harness == 'claude' else None
+    harness_cmd = route.command(prompt, claude_session_id=session_id)
     if conn is not None:
         run_id = start_run(conn, args.task_id, row[0], args.space, target, base,
-                           os.environ.get('HC_SESSION') or 'default', args.name, route)
+                           os.environ.get('HC_SESSION') or 'default', args.name, route, session_id)
         if member:
             conn.execute('UPDATE cook_runs SET member_id = ? WHERE id = ?', (member['id'], run_id))
         conn.commit()
@@ -119,6 +121,8 @@ def main():
         token = conn.execute('SELECT token FROM registry_identity WHERE id = 1').fetchone()[0]
         cmd += ['--label', 'ltc.registry=' + token, '--label', 'ltc.run=' + str(run_id),
                 '--label', 'ltc.task=' + str(args.task_id), '--label', 'ltc.project=' + str(row[0])]
+    if session_id:
+        cmd += ['--label', 'ltc.claude.session=' + session_id]
     if member:
         cmd += ['--label', 'ltc.member=' + str(member['id'])]
     if args.chef:
@@ -148,7 +152,7 @@ def main():
     except sqlite3.Error as error:
         print(json.dumps({'error': 'registry_update_failed', 'run_id': run_id, 'worktree': str(target), 'herdr': herdr, 'detail': str(error)}), file=sys.stderr)
         return 1
-    print(json.dumps({'run_id': run_id, 'worktree': str(target), 'base': base, 'member': member['name'] if member else None, **asdict(route), 'uncommitted_changes_excluded': bool(changes), 'herdr': herdr}))
+    print(json.dumps({'run_id': run_id, 'worktree': str(target), 'base': base, 'claude_session_id': session_id, 'member': member['name'] if member else None, **asdict(route), 'uncommitted_changes_excluded': bool(changes), 'herdr': herdr}))
     return 0
 
 

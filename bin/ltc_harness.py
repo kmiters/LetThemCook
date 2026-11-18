@@ -21,7 +21,7 @@ class CookRoute:
     model: Optional[str]
     reasoning_effort: Optional[str]
 
-    def command(self, prompt):
+    def command(self, prompt, *, claude_session_id=None, resume=False):
         """Build interactive CLI argv and check it before allocating a run."""
         if not isinstance(self.harness, str) or self.harness not in EFFORTS:
             raise ValueError(f'Unknown Cook harness {self.harness!r}. Choose codex, pi or claude.')
@@ -54,6 +54,10 @@ class CookRoute:
                 argv += ['--model', model]
             if effort is not None:
                 argv += ['--thinking' if self.harness == 'pi' else '--effort', effort]
+        if claude_session_id:
+            if self.harness != 'claude':
+                raise ValueError('Only Claude Code supports a conversation UUID')
+            argv += ['--resume' if resume else '--session-id', claude_session_id]
         # Even after --, Pi treats a leading @ as a filename.
         if self.harness == 'pi' and prompt.startswith('@'):
             prompt = '\n' + prompt

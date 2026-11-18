@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Resume a recorded Cook in the same worktree after its terminal has finished."""
 import argparse
+from uuid import uuid4
 from dataclasses import asdict
 import json
 import os
 from pathlib import Path
 
+from ltc_claude_session import confirm_transcript
 from ltc_endpoint import verify_callback
 from ltc_harness import CookRoute, resolve_route
 from ltc_workspace import member_for_run, member_label_matches, member_prompt
@@ -21,6 +23,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', default=os.environ.get('LTC_DB', str(ROOT / '.letthemcook' / 'registry.sqlite3')))
     parser.add_argument('--config', default=str(ROOT / 'config.json'))
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--native', action='store_true', help='Require the exact recorded Claude conversation')
+    mode.add_argument('--fresh', action='store_true', help='Intentionally start a fresh conversation')
     parser.add_argument('run_id', type=int, help='Most recent recorded run for the worktree')
     args = parser.parse_args()
     chef = os.environ.get('HC_TERMINAL_ID')
@@ -69,6 +74,9 @@ def main():
     if (previous.get('address') != run['terminal'] or not member_label_matches(run, labels)
             or any(labels.get(key) != value for key, value in expected.items())):
         raise ValueError('Previous terminal identity does not match the run')
+    old_session = run.get('claude_session_id')
+    if labels.get('ltc.claude.session') != old_session:
+        raise ValueError('Previous terminal conversation identity does not match the run')
     if previous.get('state') != 'finished':
         raise ValueError('Previous terminal is not confirmed finished')
     project = Path(member['path'] if member else run['project_path']).resolve(strict=True)
@@ -89,16 +97,29 @@ def main():
         route = resolve_route(config, run['profile'], 'codex')
     else:
         route = CookRoute(run['profile'], run['harness'], run['model'], run['reasoning_effort'])
+    if args.native and (route.harness != 'claude' or old_session is None):
+        raise ValueError('Native recovery requires a recorded Claude conversation UUID. Choose --fresh to start again.')
+    if old_session is not None and route.harness != 'claude':
+        raise ValueError('Recorded conversation does not match the harness')
+    native = old_session is not None and not args.fresh
+    session_id = None
+    if native:
+        confirm_transcript(old_session, worktree)
+        session_id = old_session
+    elif route.harness == 'claude':
+        session_id = str(uuid4())
+    context = ('Continue the recorded Claude conversation.' if native else
+               'This is a fresh session continuing the same task in the existing worktree.')
     prompt = (prompt_base + '\n\n# Resumed task\n' + task_brief
-              + '\n\nThis is a fresh session continuing the same task in the existing worktree. Inspect existing changes and prior context before editing; preserve the work. Do not assume the task is complete.'
+              + '\n\n' + context + ' Inspect existing changes and prior context before editing; preserve the work. Do not assume the task is complete.'
               + '\nPrevious run ID: ' + str(run['id']) + '\nYour worktree: ' + str(worktree) + '\nRegistry: ' + str(db)
               + '\nLetThemCook directory: ' + str(ROOT) + '\nSave results with ltc-report. Send questions to the Chef using hc send ' + chef + '.')
     if member:
         prompt += member_prompt(member, run['project_path'])
-    harness_cmd = route.command(prompt)
+    harness_cmd = route.command(prompt, claude_session_id=session_id, resume=native)
     ensure_runs(conn)
     new_id = start_run(conn, run['task_id'], run['project_id'], run['space'], worktree,
-                       run['base'], run['hc_session'], name, route)
+                       run['base'], run['hc_session'], name, route, session_id)
     if member:
         conn.execute('UPDATE cook_runs SET member_id = ? WHERE id = ?', (member['id'], new_id))
     conn.commit()
@@ -111,6 +132,8 @@ def main():
            '--label', 'herdr.space=' + run['space'], '--label', 'ltc.registry=' + run['token'],
            '--label', 'ltc.run=' + str(new_id), '--label', 'ltc.task=' + str(run['task_id']),
            '--label', 'ltc.project=' + str(run['project_id'])]
+    if session_id:
+        cmd += ['--label', 'ltc.claude.session=' + session_id]
     if member:
         cmd += ['--label', 'ltc.member=' + str(member['id'])]
     cmd += ['--', *harness_cmd]
@@ -136,7 +159,10 @@ def main():
     except sqlite3.Error as error:
         print(json.dumps({'error': 'registry_update_failed', 'run_id': new_id, 'worktree': str(worktree), 'herdr': herdr, 'detail': str(error)}), file=sys.stderr)
         return 1
-    print(json.dumps({'run_id': new_id, 'previous_run_id': run['id'], 'member': member['name'] if member else None, **asdict(route), 'worktree': str(worktree), 'herdr': herdr}))
+    recovery = {'conversation': 'native_requested' if native else 'fresh', 'claude_session_id': session_id}
+    if native:
+        recovery['readiness'] = 'Exact UUID requested. Inspect the Claude terminal to confirm recovery. Use --fresh only intentionally.'
+    print(json.dumps({**recovery, 'run_id': new_id, 'previous_run_id': run['id'], 'member': member['name'] if member else None, **asdict(route), 'worktree': str(worktree), 'herdr': herdr}))
     return 0
 
 

@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from uuid import UUID
+import sqlite3
 
 from chef_fixture import bind_chef, CHEF_GET
 
@@ -32,9 +34,21 @@ class HarnessTest(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(self.commands), LTC_DB=str(self.root / 'registry.sqlite'),
                         HC_TERMINAL_ID='chef', HC_SESSION='isolated', TEST_ROOT=str(self.root))
         self.env.pop('HC_SOCKET', None)
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.root / 'claude-data')
         for harness in ('codex', 'pi', 'claude'):
             self.executable(harness, """import json, os, sys
 from pathlib import Path
+if Path(sys.argv[0]).name == 'claude':
+    flag = '--resume' if '--resume' in sys.argv else '--session-id'
+    session = sys.argv[sys.argv.index(flag) + 1]
+    storage = Path(os.environ['CLAUDE_CONFIG_DIR'], 'projects', 'fixture')
+    storage.mkdir(parents=True, exist_ok=True)
+    transcript = storage / (session + '.jsonl')
+    if flag == '--resume':
+        assert json.loads(transcript.read_text())['sessionId'] == session
+    else:
+        assert not transcript.exists()
+        transcript.write_text(json.dumps({'type': 'user', 'cwd': str(Path.cwd()), 'sessionId': session}))
 Path(os.environ['TEST_ROOT'], 'argv').write_text(json.dumps([Path(sys.argv[0]).name, *sys.argv[1:]]))
 """)
         self.executable('hc', """import json, os, subprocess, sys
@@ -80,6 +94,11 @@ else:
 
     def assert_command(self, expected):
         argv = json.loads((self.root / 'argv').read_text())
+        if expected[0] == 'claude':
+            flag = argv[-4]
+            self.assertIn(flag, ('--resume', '--session-id'))
+            self.assertEqual(str(UUID(argv[-3])), argv[-3])
+            expected = expected + [flag, argv[-3]]
         self.assertEqual(argv[:-1], expected + ['--'])
         self.assertIn(self.brief, argv[-1])
         self.assertIn('hc send chef', argv[-1])
@@ -165,6 +184,38 @@ else:
         self.assert_command(['claude'])
         self.assertIsNone(resumed['model'])
         self.assertIsNone(resumed['reasoning_effort'])
+
+    def test_native_and_explicit_fresh_conversations(self):
+        launch = self.launch('--harness', 'claude')
+        session = launch['claude_session_id']
+        def argv():
+            return json.loads((self.root / 'argv').read_text())
+        self.assertEqual(argv()[-4:-2], ['--session-id', session])
+        resumed = self.call('ltc-resume', '1', '--native')
+        self.assertEqual(resumed['conversation'], 'native_requested')
+        self.assertEqual(argv()[-4:-2], ['--resume', session])
+        self.assertNotIn('This is a fresh session', argv()[-1])
+        path = Path(self.env['CLAUDE_CONFIG_DIR'])/'projects'/'fixture'/(session + '.jsonl')
+        path.write_text(json.dumps({'type': 'user', 'cwd': '/other', 'sessionId': session}))
+        self.assertIn('--fresh', self.call('ltc-resume', '2', ok=False))
+        path.unlink()
+        self.assertIn('--fresh', self.call('ltc-resume', '2', ok=False))
+        self.assertEqual(len(self.call('ltc-db', 'run', 'list')), 2)
+        fresh = self.call('ltc-resume', '2', '--fresh')
+        self.assertEqual(fresh['conversation'], 'fresh')
+        self.assertNotEqual(fresh['claude_session_id'], session)
+        self.assertEqual(argv()[-4:-2], ['--session-id', fresh['claude_session_id']])
+
+    def test_legacy_claude_has_only_fresh_recovery(self):
+        self.launch('--harness', 'claude')
+        with sqlite3.connect(self.env['LTC_DB']) as conn:
+            conn.execute('UPDATE cook_runs SET claude_session_id=NULL')
+        terminal = json.loads((self.root/'terminal').read_text())
+        self.assertIn('identity', self.call('ltc-resume', '1', ok=False))
+        del terminal['labels']['ltc.claude.session']
+        (self.root/'terminal').write_text(json.dumps(terminal))
+        self.assertIn('--fresh', self.call('ltc-resume', '1', '--native', ok=False))
+        self.assertEqual(self.call('ltc-resume', '1')['conversation'], 'fresh')
 
     def test_rejects_unsupported_routes_before_allocating_work(self):
         cases = [

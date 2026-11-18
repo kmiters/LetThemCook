@@ -28,18 +28,18 @@ def ensure_runs(conn):
     )''')
     # NULL harness identifies runs written by the old Codex-only launcher.
     columns = {row[1] for row in conn.execute('PRAGMA table_info(cook_runs)')}
-    for column in ('harness', 'model', 'reasoning_effort'):
+    for column in ('harness', 'model', 'reasoning_effort', 'claude_session_id'):
         if column not in columns:
             conn.execute(f'ALTER TABLE cook_runs ADD COLUMN {column} TEXT')
     conn.execute('CREATE INDEX IF NOT EXISTS cook_runs_task_id ON cook_runs(task_id, id)')
 
 
-def start_run(conn, task_id, project_id, space, worktree, base, hc_session, name, route):
+def start_run(conn, task_id, project_id, space, worktree, base, hc_session, name, route, claude_session_id=None):
     cursor = conn.execute("""INSERT INTO cook_runs
-        (task_id, project_id, space, worktree, base, hc_session, name, profile, harness, model, reasoning_effort, launch_state)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting')""",
+        (task_id, project_id, space, worktree, base, hc_session, name, profile, harness, model, reasoning_effort, claude_session_id, launch_state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting')""",
         (task_id, project_id, space, str(worktree), base, hc_session, name,
-         route.profile, route.harness, route.model, route.reasoning_effort))
+         route.profile, route.harness, route.model, route.reasoning_effort, claude_session_id))
     return cursor.lastrowid
 
 
