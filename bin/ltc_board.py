@@ -10,7 +10,7 @@ import re
 import sqlite3
 import subprocess
 
-from ltc_registry import get_brief
+from ltc_registry import get_brief, has_reports, review_url, task_reports
 
 ASSETS = Path(__file__).resolve().parent.parent / 'board'
 LANES = {'todo': 'To do', 'in_progress': 'In progress', 'blocked': 'Blocked',
@@ -121,17 +121,21 @@ def index(conn):
 def card(task, base):
     preview = (task['preview'] or task['description']).strip()
     excerpt = escape(preview[:160] + ('…' if len(preview) > 160 else ''))
+    outcome = task['outcome'] or ''
+    summary = f'<p><b>Cook report</b> {escape(outcome[:120])}{"…" if len(outcome) > 120 else ""}</p>' if outcome else ''
     return f'''<a class="ticket" href="{base}/tasks/{task['id']}">
 <span class="ticket-top"><span>#{task['id']}</span><span class="arrow" aria-hidden="true">›</span></span>
 <strong>{escape(task['title'])}</strong>{f'<p>{excerpt}</p>' if excerpt else ''}
-<span class="stamp">Updated {escape(task['updated_at'][:10])}</span></a>'''
+{summary}<span class="stamp">Updated {escape(task['updated_at'][:10])}</span></a>'''
 
 
 def board(conn, p, base):
     has_briefs = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_briefs'").fetchone()
     preview = 'b.intent' if has_briefs else "''"
     join = 'LEFT JOIN task_briefs b ON b.task_id = t.id' if has_briefs else ''
-    tasks = conn.execute(f"""SELECT t.*, {preview} AS preview FROM tasks t {join}
+    outcome = """(SELECT cr.outcome FROM cook_reports cr JOIN cook_runs r ON r.id=cr.run_id
+        WHERE r.task_id=t.id AND r.project_id=t.project_id ORDER BY cr.id DESC LIMIT 1)""" if has_reports(conn) else "NULL"
+    tasks = conn.execute(f"""SELECT t.*, {outcome} AS outcome, {preview} AS preview FROM tasks t {join}
                              WHERE t.project_id = ? ORDER BY t.updated_at DESC, t.id DESC""", (p['id'],)).fetchall()
     counts = Counter(t['status'] for t in tasks)
     lanes = []
@@ -158,6 +162,13 @@ def detail(conn, task, project, base):
     fields.append(('Additional notes', task['description']))
     sections = ''.join(f'<section><h2>{label}</h2><p>{escape(value)}</p></section>'
                        for label, value in fields if value and value.strip())
+    for report in task_reports(conn, project['id'], task['id']):
+        url = report['review_url']
+        link = f'<p><a href="{escape(url)}">Open review</a></p>' if url and review_url(url) else ''
+        sections += (f'<section><h2>Cook report · Run {report["run_id"]}</h2>'
+                     f'<small>{escape(report["created_at"])} UTC</small>'
+                     f'<p>{escape(report["outcome"])}</p><h3>Validation</h3>'
+                     f'<p>{escape(report["validation"])}</p>{link}</section>')
     status = task['status']
     name = escape(project['name'])
     return page(task['title'], f'''<a class="back" href="{base}">← {name} board</a><article class="brief">

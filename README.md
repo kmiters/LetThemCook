@@ -139,6 +139,14 @@ Both `ltc-cook` and the underlying `ltc` accept `--config PATH`, `--harness` and
 
 Worktrees start at `HEAD`, or a committed revision specified by `--base`. They **do not include uncommitted files or changes** from the main checkout; the output flags when those exist. Chef must account for them before delegating. The launcher adds `/.letthemcook/` to the local Git `info/exclude`, not the tracked `.gitignore`. It does not install dependencies or copy ignored files. If starting the Cook fails after worktree creation, the path is reported and preserved; inspect it before retrying. The launcher never removes worktrees; the guarded close operation below can remove them after acceptance and verification.
 
+A registered Cook can persist an outcome before notifying its Chef:
+
+```sh
+bin/ltc-report --db DATABASE --outcome "Added the requested view" --validation "12 tests passed" --review-url http://127.0.0.1:8080 --notify
+```
+
+Run this from the recorded live Cook terminal. Each run can save 20 distinct reports with up to 4,000 characters each for outcome and validation. The HTTP(S) review URL is optional when unavailable. Retrying identical content returns the same report ID. If notification fails, the report stays saved and the same command retries delivery. Concurrent sends or a lost acknowledgement can repeat a notification. The card shows the latest outcome, and the task detail and `ltc-db task show` show the latest 20 reports. Saving a report leaves task status and user acceptance untouched.
+
 The launcher gives the Cook the Chef return address from `HC_TERMINAL_ID` (or `--chef ADDRESS`) so it can report with `hc send`. Check `first_message.sent` in the launch result and inspect the session if delivery failed. Use `hc get ADDRESS`, `hc wait ADDRESS --timeout 60` and `hc read ADDRESS --lines 80` to supervise a Cook. Use `bin/ltc-cook-control send RUN_ID MESSAGE` for Cook follow-ups and `bin/ltc-cook-control close RUN_ID` after user acceptance and marking the task `done`. These commands verify registry, run, task, project and Space labels against the recorded terminal in its recorded hc session; they refuse if identity cannot be established. The check and action are separate Herdr calls, not an atomic operation. Old launches without labels cannot be controlled by these commands and require manual inspection. `close` checks and removes the worktree as described below. After successful terminal removal it records a verified close; if removal or recording fails, status does not claim a verified close. A new conversation limits inherited chat context, not access to files or tools allowed by the Cook's sandbox. Cooks can read project instructions and other permitted files. Do not run simultaneous conflicting tasks without coordination.
 
 ## Supervise Cooks without continuous model use

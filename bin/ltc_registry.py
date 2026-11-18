@@ -90,3 +90,27 @@ def format_task(task):
         body = compact(value)
         sections.append('## Additional notes\n' + body)
     return '\n\n'.join(sections)
+
+
+def review_url(value):
+    """Accept only absolute HTTP(S) review links in both stored and rendered data."""
+    from urllib.parse import urlsplit
+    try:
+        parsed = urlsplit(value)
+        return (0 < len(value) <= 2048 and not any(c.isspace() or ord(c) < 32 for c in value)
+                and '\\' not in value and parsed.scheme in ('http', 'https')
+                and bool(parsed.hostname) and parsed.username is None and parsed.password is None)
+    except (TypeError, ValueError):
+        return False
+
+
+def has_reports(conn):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cook_reports'").fetchone() is not None
+
+
+def task_reports(conn, project_id, task_id):
+    if not has_reports(conn):
+        return []
+    return [dict(row) for row in conn.execute('''SELECT p.id, p.run_id, p.outcome, p.validation, p.review_url, p.created_at
+        FROM cook_reports p JOIN cook_runs r ON r.id=p.run_id
+        WHERE r.task_id=? AND r.project_id=? ORDER BY p.id DESC LIMIT 20''', (task_id, project_id))]

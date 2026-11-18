@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Save a report from the current verified Cook terminal."""
+import argparse
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+
+from ltc_endpoint import verified_chef
+from ltc_registry import review_url
+from ltc_status import inspect_terminal
+from ltc_workspace import member_for_run
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--db', default=os.environ.get('LTC_DB', ROOT / '.letthemcook/registry.sqlite3'))
+    parser.add_argument('--outcome', required=True)
+    parser.add_argument('--validation', required=True, help='Checks and results, including omissions')
+    parser.add_argument('--review-url', default='')
+    parser.add_argument('--notify', action='store_true', help='Notify the currently bound Chef after saving')
+    args = parser.parse_args()
+    fields = (args.outcome.strip(), args.validation.strip(), args.review_url.strip())
+    if any(not value or len(value) > 4000 for value in fields[:2]):
+        raise ValueError('Outcome and validation must each contain 1 to 4000 characters')
+    if fields[2] and not review_url(fields[2]):
+        raise ValueError('Provide an absolute HTTP(S) review URL of at most 2048 characters')
+    cook_session = os.environ.get('HC_SESSION') or 'default'
+    address = os.environ.get('HC_TERMINAL_ID')
+    if not address or os.environ.get('HC_SOCKET'):
+        raise ValueError('Report from the recorded Cook terminal without an HC_SOCKET override')
+    db = Path(args.db).expanduser().resolve()
+    with sqlite3.connect(db.as_uri() + '?mode=rw', uri=True, timeout=10) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('''SELECT r.*, p.path AS project_path, i.token FROM cook_runs r
+            JOIN projects p ON p.id=r.project_id JOIN tasks t ON t.project_id=p.id AND t.id=r.task_id
+            JOIN registry_identity i ON i.id=1 WHERE r.terminal=? AND r.hc_session=?
+            ORDER BY r.id DESC LIMIT 1''', (address, cook_session)).fetchone()
+        if not row:
+            raise ValueError('No recorded Cook matches this session and address')
+        run = dict(row)
+        member_for_run(conn, run)
+        status, _ = inspect_terminal(run, run['token'])
+        if status['state'] != 'live':
+            raise ValueError('Could not verify the live reporting Cook')
+        conn.execute('''CREATE TABLE IF NOT EXISTS cook_reports (
+            id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES cook_runs(id),
+            outcome TEXT NOT NULL, validation TEXT NOT NULL, review_url TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, notified INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(run_id,outcome,validation,review_url))''')
+        report = conn.execute('''SELECT id FROM cook_reports WHERE run_id=? AND
+            outcome=? AND validation=? AND review_url=?''', (run['id'], *fields)).fetchone()
+        if report:
+            report_id = report['id']
+        else:
+            if conn.execute('SELECT count(*) FROM cook_reports WHERE run_id=?', (run['id'],)).fetchone()[0] >= 20:
+                raise ValueError('This run already has 20 distinct reports')
+            report_id = conn.execute('INSERT INTO cook_reports(run_id,outcome,validation,review_url) VALUES (?,?,?,?)',
+                                     (run['id'], *fields)).lastrowid
+        conn.commit()
+        result = {'report_id': report_id, 'run_id': run['id'], 'task_id': run['task_id'], 'saved': True}
+        if args.notify:
+            try:
+                # Overlapping sends can replay a notification. Keep the registry
+                # writable while Herdr delivers it.
+                if not conn.execute('SELECT notified FROM cook_reports WHERE id=?', (report_id,)).fetchone()[0]:
+                    session, chef = verified_chef(conn, run['project_id'])
+                    env = dict(os.environ, HC_SESSION=session)
+                    message = f"Cook report {report_id} saved for task {run['task_id']}, run {run['id']}. Review the task details."
+                    subprocess.run(['hc', 'send', chef, message], env=env, capture_output=True, check=True, timeout=75)
+                    conn.execute('UPDATE cook_reports SET notified=1 WHERE id=?', (report_id,))
+                conn.commit()
+                result['notified'] = True
+            except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+                conn.rollback()
+                print(json.dumps(dict(result, notified=False, detail=str(error))))
+                return 1
+        print(json.dumps(result))
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+        sys.exit(f'ltc-report: {error}')

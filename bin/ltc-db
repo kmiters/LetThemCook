@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 from ltc_workspace import check_single_checkout, ensure_members, members_for, workspace_checkouts
-from ltc_registry import BRIEF_FIELDS, ensure_briefs, ensure_runs, get_brief
+from ltc_registry import BRIEF_FIELDS, ensure_briefs, ensure_runs, get_brief, task_reports
 
 ROOT = Path(__file__).resolve().parent.parent
 STATUSES = ('todo', 'in_progress', 'blocked', 'done', 'cancelled')
@@ -120,6 +120,7 @@ def main():
                 raise ValueError(f'Task not found: {task_id}')
             task = dict(row)
             task['brief'] = get_brief(conn, task_id)
+            task['reports'] = task_reports(conn, task['project_id'], task_id)
             return task
 
         def update_brief(task_id, fields):

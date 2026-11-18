@@ -92,7 +92,7 @@ def main():
     prompt = (prompt_base + '\n\n# Resumed task\n' + task_brief
               + '\n\nThis is a fresh session continuing the same task in the existing worktree. Inspect existing changes and prior context before editing; preserve the work. Do not assume the task is complete.'
               + '\nPrevious run ID: ' + str(run['id']) + '\nYour worktree: ' + str(worktree) + '\nRegistry: ' + str(db)
-              + '\nLetThemCook directory: ' + str(ROOT) + '\nReport the outcome or blocker to the Chef using hc send ' + chef + '.')
+              + '\nLetThemCook directory: ' + str(ROOT) + '\nSave results with ltc-report. Send questions to the Chef using hc send ' + chef + '.')
     if member:
         prompt += member_prompt(member, run['project_path'])
     harness_cmd = route.command(prompt)

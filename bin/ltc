@@ -81,7 +81,7 @@ def main():
     elif args.chef:
         raise ValueError('A Chef callback requires a registered --task-id')
     if args.chef:
-        prompt += '\nReport the outcome or blocker to the Chef using hc send ' + args.chef + '. This is the verified return address supplied by the launcher.'
+        prompt += '\nSave results with ltc-report. Send questions to the Chef using hc send ' + args.chef + '. This is the verified return address supplied by the launcher.'
     harness_cmd = route.command(prompt)
     if conn is not None:
         run_id = start_run(conn, args.task_id, row[0], args.space, target, base,
