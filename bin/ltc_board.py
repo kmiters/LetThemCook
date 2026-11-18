@@ -14,7 +14,8 @@ from ltc_registry import get_brief
 
 ASSETS = Path(__file__).resolve().parent.parent / 'board'
 LANES = {'todo': 'To do', 'in_progress': 'In progress', 'blocked': 'Blocked',
-         'done': 'Done', 'cancelled': 'Cancelled'}
+         'done': 'Done'}
+STATUS_LABELS = {**LANES, 'cancelled': 'Cancelled'}
 BRIEF = {'intent': 'User request', 'context': 'Context', 'scope': 'Scope',
          'acceptance': 'Acceptance criteria', 'checks': 'Verification'}
 
@@ -77,16 +78,29 @@ def select_project(conn, name, cwd):
     return None
 
 
-def page(title, body):
+def project_navigation(projects, active_href, task_id):
+    links = [('/', 'All projects')]
+    links.extend((f"/projects/{p['id']}", p['name']) for p in projects)
+    current = 'location' if task_id is not None else 'page'
+    items = []
+    for href, label in links:
+        selected = f' aria-current="{current}"' if href == active_href else ''
+        items.append(f'<a href="{href}"{selected}>{escape(label)}</a>')
+    if task_id is not None:
+        items.append(f'<span class="view-task">#{task_id}</span>')
+    return ''.join(items)
+
+
+def page(title, body, *, projects=(), active_href=None, task_id=None):
+    trail = project_navigation(projects, active_href, task_id)
     # Embed a revision of the full view, including task details and project navigation.
-    revision = sha256(body.encode()).hexdigest()
+    revision = sha256((trail + body).encode()).hexdigest()
     return f'''<!doctype html>
 <html lang="en" data-revision="{revision}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)} · LetThemCook</title><link rel="icon" href="data:,">
 <link rel="stylesheet" href="/board.css"><script defer src="/board.js"></script></head>
-<body><header class="mast"><a class="brand" href="/"><i class="mark" aria-hidden="true">≋</i>LetThemCook</a>
-<a class="all-projects" href="/">All projects <span aria-hidden="true">↗</span></a></header>
+<body><header><nav class="view-nav" aria-label="Project navigation">{trail}</nav></header>
 <main>{body}</main><footer><span>LetThemCook <b>/</b> Chef registry</span>
 <span id="sync" role="status">Read-only view</span></footer></body></html>''', revision
 
@@ -94,19 +108,21 @@ def page(title, body):
 def index(conn):
     rows = conn.execute("""SELECT p.id, p.name, p.description, COUNT(t.id) AS total
                            FROM projects p LEFT JOIN tasks t ON p.id = t.project_id
-                           GROUP BY p.id ORDER BY p.name COLLATE NOCASE, p.id""")
+                           GROUP BY p.id ORDER BY p.name COLLATE NOCASE, p.id""").fetchall()
     links = ''.join(f'''<a class="project-link" href="/projects/{p['id']}">
 <span><strong>{escape(p['name'])}</strong><small>{escape(p['description'])}</small></span>
-<span class="mono">{p['total']} tasks ↗</span></a>''' for p in rows)
-    return page('Projects', '<p class="eyebrow">Chef registry</p><h1>Projects</h1>' +
-                (links or '<p class="notice">No projects yet. Register a checkout with ltc-project to see its board here.</p>'))
+<span class="project-meta">{p['total']} {'task' if p['total'] == 1 else 'tasks'} <span class="arrow" aria-hidden="true">›</span></span></a>''' for p in rows)
+    return page('Projects', '<section class="project-picker"><h1>Projects</h1>' +
+                (f'<div class="project-list">{links}</div>' if links else
+                 '<p class="notice">No projects yet. Register a checkout with ltc-project to see its board here.</p>') +
+                '</section>', projects=rows, active_href='/')
 
 
 def card(task, base):
     preview = (task['preview'] or task['description']).strip()
     excerpt = escape(preview[:160] + ('…' if len(preview) > 160 else ''))
     return f'''<a class="ticket" href="{base}/tasks/{task['id']}">
-<span class="ticket-top"><span>№ {task['id']:03d}</span><span class="arrow" aria-hidden="true">↗</span></span>
+<span class="ticket-top"><span>#{task['id']}</span><span class="arrow" aria-hidden="true">›</span></span>
 <strong>{escape(task['title'])}</strong>{f'<p>{excerpt}</p>' if excerpt else ''}
 <span class="stamp">Updated {escape(task['updated_at'][:10])}</span></a>'''
 
@@ -126,13 +142,14 @@ def board(conn, p, base):
     name = escape(p['name'])
     space = p['space'] if 'space' in p.keys() else None
     context = f' <b>/</b> Space {escape(space)}' if space else ''
-    desc = f"<p class='description'>{escape(p['description'])}</p>" if p['description'] else ''
+    description = escape(p['description'])
+    desc = f'<p class="description" title="{description}">{description}</p>' if description else ''
     empty = '' if tasks else '<p class="notice">No tasks recorded yet. Tasks saved by this project’s Chef will appear here.</p>'
-    return page(p['name'], f'''<div class="hero"><div><p class="eyebrow"><i></i> Chef’s task board</p>
-<h1>{name}</h1>{desc}<div class="meta">Chef @ {name}{context}</div></div>
-<div class="tally"><strong>{len(tasks):02d}</strong><span>Registered tasks</span></div></div>
-<div class="section-heading"><h2>Task board</h2></div>{empty}
-<div class="lanes">{''.join(lanes)}</div>''')
+    return page(p['name'], f'''<div class="project-header">
+<div class="project-heading"><h1>{name}</h1>
+<span class="task-total" title="Registered tasks">{len(tasks)}<span class="visually-hidden"> registered tasks</span></span></div>
+{desc}<div class="meta">Chef @ {name}{context}</div></div>
+{empty}<div class="lanes">{''.join(lanes)}</div>''', projects=list_projects(conn), active_href=base)
 
 
 def detail(conn, task, project, base):
@@ -144,10 +161,11 @@ def detail(conn, task, project, base):
     status = task['status']
     name = escape(project['name'])
     return page(task['title'], f'''<a class="back" href="{base}">← {name} board</a><article class="brief">
-<div class="brief-meta"><span class="eyebrow">Task № {task['id']:03d}</span>
-<span class="{escape(status)}"><i class="dot"></i>{escape(LANES.get(status, status))}</span></div>
+<div class="brief-meta"><span class="eyebrow">#{task['id']}</span>
+<span class="status {escape(status)}"><i class="dot"></i>{escape(STATUS_LABELS.get(status, status))}</span></div>
 <h1>{escape(task['title'])}</h1><div class="meta">Chef @ {name} <b>/</b> Updated {escape(task['updated_at'])} UTC</div>
-{sections or '<p class="notice">No brief or notes recorded for this task.</p>'}</article>''')
+{sections or '<p class="notice">No brief or notes recorded for this task.</p>'}</article>''',
+                projects=list_projects(conn), active_href=base, task_id=task['id'])
 
 
 def lookup(conn, path):
@@ -164,7 +182,8 @@ def lookup(conn, path):
             task = conn.execute('SELECT * FROM tasks WHERE project_id = ? AND id = ?', (project_id, task_id)).fetchone()
             if task:
                 return 200, detail(conn, task, p, base)
-    return 404, page('Page unavailable', '<h1>Page unavailable</h1><p>Check the project and task address or <a href="/">choose a project</a>.</p>')
+    return 404, page('Page unavailable', '<h1>Page unavailable</h1><p>Check the project and task address or <a href="/">choose a project</a>.</p>',
+                     projects=list_projects(conn))
 
 
 class Handler(BaseHTTPRequestHandler):

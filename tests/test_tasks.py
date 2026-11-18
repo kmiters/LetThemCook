@@ -111,13 +111,25 @@ class BoardTest(unittest.TestCase):
         self.assertNotEqual(self.cli('--db', missing, check=False).returncode, 0)
         self.assertFalse(missing.exists())
         self.registry('task', 'add', 'app', 'Legacy', '--description', 'Original notes')
+        self.registry('task', 'add', 'app', 'Cancelled legacy task', '--description', 'Cancelled notes')
+        self.registry('task', 'update', '2', '--status', 'cancelled')
         with closing(sqlite3.connect(self.db)) as conn:
             conn.execute('DROP TABLE task_briefs')
             conn.commit()
         before = hashlib.sha256(self.db.read_bytes()).digest()
         with closing(connect(self.db)) as conn:
-            for path in ('/projects/1', '/projects/1/tasks/1'):
-                self.assertIn('Original notes', lookup(conn, path)[1][0])
+            status, (board, _) = lookup(conn, '/projects/1')
+            self.assertEqual(status, 200)
+            self.assertIn('Original notes', board)
+            self.assertNotIn('class="lane cancelled"', board)
+            self.assertNotIn('href="/projects/1/tasks/2"', board)
+            self.assertIn('class="task-total" title="Registered tasks">2<', board)
+            self.assertIn('Original notes', lookup(conn, '/projects/1/tasks/1')[1][0])
+
+            status, (detail, _) = lookup(conn, '/projects/1/tasks/2')
+            self.assertEqual(status, 200)
+            self.assertIn('Cancelled notes', detail)
+            self.assertIn('class="status cancelled"><i class="dot"></i>Cancelled', detail)
             with self.assertRaisesRegex(sqlite3.OperationalError, 'readonly'):
                 conn.execute("UPDATE tasks SET status = 'done'")
         self.assertEqual(before, hashlib.sha256(self.db.read_bytes()).digest())
@@ -145,7 +157,7 @@ class BoardTest(unittest.TestCase):
 
     def test_registry_status_changes_move_the_existing_ticket(self):
         self.registry('task', 'add', 'app', 'A single task')
-        for status in ('todo', 'in_progress', 'blocked', 'done', 'cancelled'):
+        for status in ('todo', 'in_progress', 'blocked', 'done'):
             with self.subTest(status=status):
                 self.registry('task', 'update', '1', '--status', status)
                 with closing(connect(self.db)) as conn:
@@ -154,6 +166,32 @@ class BoardTest(unittest.TestCase):
                 self.assertIn('<span class="count">1</span>', lane)
                 self.assertIn('href="/projects/1/tasks/1"', lane)
                 self.assertEqual(html.count('class="ticket"'), 1)
+
+    def test_project_navigation_on_overview_board_and_detail(self):
+        task = self.registry('task', 'add', 'app', 'A single task')
+        task_path = f"/projects/1/tasks/{task['id']}"
+        with closing(connect(self.db)) as conn:
+            _, revision_before = lookup(conn, task_path)[1]
+
+        repo2 = self.root / 'second'
+        subprocess.run(['git', 'init', '-q', repo2], check=True)
+        project = self.registry('project', 'add', 'Alpha & Beta', repo2)
+        other_path = f"/projects/{project['id']}"
+        paths = (('/', '/', 'page'), ('/projects/1', '/projects/1', 'page'),
+                 (task_path, '/projects/1', 'location'))
+        with closing(connect(self.db)) as conn:
+            for path, active, current in paths:
+                with self.subTest(path=path):
+                    html, revision = lookup(conn, path)[1]
+                    nav = html.split('<nav ', 1)[1].split('</nav>', 1)[0]
+                    self.assertEqual(re.findall(r'<a href="([^"]+)"', nav),
+                                     ['/', other_path, '/projects/1'])
+                    self.assertIn('Alpha &amp; Beta</a>', nav)
+                    self.assertEqual(nav.count('aria-current='), 1)
+                    self.assertIn(f'href="{active}" aria-current="{current}"', nav)
+                    if path == task_path:
+                        self.assertIn(f'<span class="view-task">#{task["id"]}</span>', nav)
+                        self.assertNotEqual(revision_before, revision)
 
     def test_concurrent_launch_http_refresh_reuse_and_collision(self):
         # Real CLI, including the detached listener. Stop just this test's process.
@@ -180,7 +218,7 @@ class BoardTest(unittest.TestCase):
 
         status, headers, body = request('/projects/1')
         self.assertEqual(status, 200)
-        self.assertEqual(body.count('No tasks here'), 5)
+        self.assertEqual(body.count('No tasks here'), 4)
         self.assertIn('frame-ancestors', headers['Content-Security-Policy'])
         self.assertEqual(request('/projects/1', 'HEAD', {'If-None-Match': headers['ETag']})[0], 304)
         self.registry('task', 'add', 'app', 'Fresh change')
