@@ -1,5 +1,7 @@
 # LetThemCook (LTC)
 
+![Let Them Cook agent kitchen illustration](docs/let-them-cook.png)
+
 LetThemCook is a lightweight orchestration workflow for Herdr Desktop with a per-project Codex or Claude Code Chef and selectable Cook CLIs. You talk to the **Chef**; the Chef starts a fresh **Cook** for each implementation task, supervises the work and reviews the result.
 
 ## Requirements
