@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ltc_endpoint import verify_callback
 from ltc_harness import EFFORTS, resolve_route
 from ltc_workspace import check_member_worktree, checked_member_path, member_for_task, member_prompt
 from ltc_registry import connect, ensure_runs, start_run, terminal_name
@@ -30,7 +31,7 @@ def main():
     parser.add_argument('--profile', help='Configured Cook model profile')
     parser.add_argument('--task', required=True, help='Self-contained task brief')
     parser.add_argument('--base', default='HEAD', help='Committed base (default: HEAD)')
-    parser.add_argument('--chef', default=os.environ.get('HC_TERMINAL_ID'), help='Chef terminal address for Cook reports (defaults to HC_TERMINAL_ID)')
+    parser.add_argument('--chef', help='Chef terminal address for Cook reports (defaults to HC_TERMINAL_ID)')
     parser.add_argument('--task-id', type=int, help='Registry task ID for recording this launch')
     parser.add_argument('--db', default=os.environ.get('LTC_DB', str(ROOT / '.letthemcook' / 'registry.sqlite3')), help='Registry database')
     parser.add_argument('--config', default=str(ROOT / 'config.json'), help='JSON configuration')
@@ -72,6 +73,11 @@ def main():
             check_member_worktree(checkout, target)
             prompt += member_prompt(member, row[1])
         prompt += '\nRegistry: ' + str(db_path) + '\nLetThemCook directory: ' + str(ROOT)
+        args.chef = args.chef or os.environ.get('HC_TERMINAL_ID')
+        if args.chef:
+            verify_callback(conn, row[0], args.chef)
+    elif args.chef:
+        raise ValueError('A Chef callback requires a registered --task-id')
     if args.chef:
         prompt += '\nReport the outcome or blocker to the Chef using hc send ' + args.chef + '. This is the verified return address supplied by the launcher.'
     harness_cmd = route.command(prompt)
@@ -147,6 +153,6 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (OSError, KeyError, ValueError, sqlite3.Error, subprocess.CalledProcessError) as error:
+    except (OSError, KeyError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
         print(f'ltc: {error}', file=sys.stderr)
         sys.exit(1)

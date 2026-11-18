@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 
+from ltc_endpoint import verify_callback
 from ltc_harness import CookRoute, resolve_route
 from ltc_workspace import member_for_run, member_label_matches, member_prompt
 from ltc_registry import ensure_runs, format_task, get_brief, start_run, terminal_name
@@ -59,6 +60,7 @@ def main():
     if not run['terminal']:
         raise ValueError('No recorded terminal; cannot prove the previous Cook stopped')
     env = dict(os.environ, HC_SESSION=run['hc_session'])
+    verify_callback(conn, run['project_id'], chef)
     previous = json.loads(subprocess.run(['hc', 'get', run['terminal']], env=env, capture_output=True,
                                           text=True, check=True, timeout=10).stdout)
     expected = {'ltc.registry': run['token'], 'ltc.run': str(run['id']), 'ltc.task': str(run['task_id']),

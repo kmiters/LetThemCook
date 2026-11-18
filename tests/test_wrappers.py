@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from chef_fixture import bind_chef, CHEF_GET
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -31,12 +33,15 @@ else: print(json.dumps({'id':'tab1'}))
             hc = root / 'hc'
             hc.write_text('''#!/usr/bin/env python3
 import json, os, sys
-open(os.environ['HC_ARGS'], 'w').write(json.dumps(sys.argv[1:]))
+''' + CHEF_GET + '''open(os.environ['HC_ARGS'], 'w').write(json.dumps(sys.argv[1:]))
 print(json.dumps({'address':'t-cook'}))
 ''')
             hc.chmod(0o755)
             env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'], LTC_DB=str(root / 'registry.sqlite'), HC_TERMINAL_ID='t-chef', HC_ARGS=str(root / 'hc-args'))
             subprocess.run([str(ROOT / 'bin/ltc-project'), 'app', str(project), 'sp1'], env=env, text=True, capture_output=True, check=True)
+            env.pop('HC_SOCKET', None)
+            env['HC_SESSION'] = 'default'
+            bind_chef(env, 'sp1')
             added = subprocess.run([str(ROOT / 'bin/ltc-db'), 'task', 'add', 'app', 'Task title', '--description', 'Legacy note', '--intent', 'User request', '--context', 'Background', '--scope', 'Only this', '--acceptance', 'Acceptance criteria', '--checks', 'Tests'], env=env, text=True, capture_output=True, check=True)
             task_id = str(json.loads(added.stdout)['id'])
             result = subprocess.run([str(ROOT / 'bin/ltc-cook'), 'app', task_id], env=env, text=True, capture_output=True, check=True)
@@ -66,14 +71,14 @@ print(json.dumps({'address':'t-cook'}))
             self.assertEqual(row['hc_session'], 'default')
             self.assertTrue(Path(row['worktree']).is_dir())
             self.assertEqual(len(row['base']), 40)
-            hc.write_text('#!/bin/sh\necho failure >&2\nexit 1\n')
+            hc.write_text('#!/bin/sh\nif [ "$1" = get ]; then echo "$TEST_CHEF"; exit 0; fi\necho failure >&2\nexit 1\n')
             failed = subprocess.run([str(ROOT / 'bin/ltc-cook'), 'app', task_id, 'retry'], env=env, text=True, capture_output=True)
             self.assertNotEqual(failed.returncode, 0)
             failure = json.loads(failed.stderr)
             self.assertTrue(Path(failure['worktree']).is_dir())
             show = subprocess.run([str(ROOT / 'bin/ltc-db'), 'run', 'show', str(failure['run_id'])], env=env, text=True, capture_output=True, check=True)
             self.assertEqual(json.loads(show.stdout)['launch_state'], 'unknown')
-            hc.write_text("#!/bin/sh\nprintf '%s\\n' '{\"address\":\"t-second\",\"first_message\":{\"sent\":false,\"reason\":\"not ready\"}}'\n")
+            hc.write_text("#!/bin/sh\nif [ \"$1\" = get ]; then echo \"$TEST_CHEF\"; exit 0; fi\nprintf '%s\\n' '{\"address\":\"t-second\",\"first_message\":{\"sent\":false,\"reason\":\"not ready\"}}'\n")
             delivery = subprocess.run([str(ROOT / 'bin/ltc-cook'), 'app', task_id, 'third'], env=env, text=True, capture_output=True, check=True)
             show = subprocess.run([str(ROOT / 'bin/ltc-db'), 'run', 'show', str(json.loads(delivery.stdout)['run_id'])], env=env, text=True, capture_output=True, check=True)
             row = json.loads(show.stdout)

@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+from chef_fixture import bind_chef, CHEF_GET
 from urllib.parse import urlsplit
 
 BIN = Path(__file__).resolve().parents[1] / 'bin'
@@ -42,7 +44,7 @@ class WorkspaceTest(unittest.TestCase):
         self.fake('hc', """
 import json, os, sys
 from pathlib import Path
-root = Path(os.environ['FAKE_ROOT'])
+""" + CHEF_GET + """root = Path(os.environ['FAKE_ROOT'])
 args = sys.argv[1:]
 with (root / 'hc.log').open('a') as log:
     print(json.dumps(args), file=log)
@@ -96,7 +98,11 @@ else:
 
     def register(self, *names, ok=True):
         flags = [arg for name in names for arg in ('--member', name)]
-        return self.cli('ltc-db', 'project', 'add', 'group', self.workspace, '--space', 'sp', *flags, ok=ok)
+        result = self.cli('ltc-db', 'project', 'add', 'group', self.workspace, '--space', 'sp', *flags, ok=ok)
+
+        if ok:
+            bind_chef(self.env, 'sp')
+        return result
 
     def launch(self, index=0):
         task = self.cli('ltc-db', 'task', 'add', 'group', 'Inspect', '--member', NAMES[index])

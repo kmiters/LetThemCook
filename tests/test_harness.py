@@ -7,6 +7,8 @@ import sys
 import tempfile
 import unittest
 
+from chef_fixture import bind_chef, CHEF_GET
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,7 +39,7 @@ Path(os.environ['TEST_ROOT'], 'argv').write_text(json.dumps([Path(sys.argv[0]).n
 """)
         self.executable('hc', """import json, os, subprocess, sys
 from pathlib import Path
-root = Path(os.environ['TEST_ROOT'])
+""" + CHEF_GET + """root = Path(os.environ['TEST_ROOT'])
 if sys.argv[1] == 'get':
     print((root / 'terminal').read_text())
 else:
@@ -51,6 +53,7 @@ else:
     print(json.dumps(terminal))
 """)
         self.call('ltc-db', 'project', 'add', 'p', str(self.project), '--space', 'sp')
+        bind_chef(self.env, 'sp')
         self.brief = "-m another-model\nO'Brien \"two words\" $(touch injected) `touch injected` ; *"
         self.call('ltc-db', 'task', 'add', 'p', 'Test', '--intent', self.brief)
         self.config = json.loads((ROOT / 'config.json').read_text())
@@ -83,6 +86,22 @@ else:
         if expected[0] == 'pi':
             self.assertTrue(argv[-1].startswith('\n@file'))
         self.assertFalse(list(self.project.rglob('injected')))
+
+    def test_dispatch_and_resume_reject_stale_callbacks(self):
+        launch = self.launch('first')
+        original = json.loads(self.env['TEST_CHEF'])
+        for field, value in [('address', 'other'), ('state', 'finished'),
+                             ('ltc.chef.registry', 'other'), ('ltc.chef.project', '2'), ('herdr.space', 'elsewhere')]:
+            terminal = json.loads(json.dumps(original))
+            (terminal if field in ('address', 'state') else terminal['labels'])[field] = value
+            self.env['TEST_CHEF'] = json.dumps(terminal)
+            self.assertIn('Chef identity', self.launch('second', ok=False))
+            self.assertIn('Chef identity', self.call('ltc-resume', str(launch['run_id']), ok=False))
+        self.env['TEST_CHEF'] = json.dumps(original)
+        self.env['HC_SESSION'] = 'wrong'
+        self.assertIn('session', self.launch('second', ok=False))
+        self.assertEqual(len(self.call('ltc-db', 'run', 'list')), 1)
+        self.assertFalse((Path(launch['worktree']).parent / 'second').exists())
 
     def test_default_and_complexity_profiles(self):
         # Include a configuration written before default_harness existed.

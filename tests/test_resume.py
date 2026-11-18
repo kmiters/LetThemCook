@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
+from chef_fixture import bind_chef, CHEF_GET
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -33,6 +35,7 @@ class ResumeTest(unittest.TestCase):
         with sqlite3.connect(self.db) as conn:
             token = conn.execute('SELECT token FROM registry_identity').fetchone()[0]
             conn.execute("INSERT INTO cook_runs (task_id,project_id,space,worktree,base,terminal,hc_session,name,profile,launch_state) VALUES (1,1,'sp1',?,'abc','t-old','session-x','task-1','default','started')", (str(self.worktree),))
+        bind_chef(self.env, 'sp1')
         self.info = {'address':'t-old', 'state':'finished', 'labels':{'ltc.registry':token,'ltc.run':'1','ltc.task':'1','ltc.project':'1','herdr.space':'sp1'}}
         self.info_path = self.root / 'terminal.json'
         self.write_info()
@@ -41,7 +44,7 @@ class ResumeTest(unittest.TestCase):
         hc.write_text('''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
-with open(os.environ['HC_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')
+''' + CHEF_GET + '''with open(os.environ['HC_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')
 if sys.argv[1] == 'get': print(Path(os.environ['TERMINAL_INFO']).read_text())
 else: print(json.dumps({'address':'t-new', 'first_message':{'sent':True}}))
 ''')
