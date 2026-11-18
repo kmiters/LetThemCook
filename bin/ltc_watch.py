@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 
+from ltc_endpoint import verified_chef
 from ltc_status import inspect_run
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -175,19 +176,12 @@ def observe_and_deliver(conn, project_id, token):
     # the whole batch, preserving the existing at-least-once delivery guarantee.
     for offset in range(0, len(events), 20):
         batch = events[offset:offset + 20]
-        target = conn.execute('SELECT * FROM watch_targets WHERE project_id = ?', (project_id,)).fetchone()
-        if not target:
-            break
         try:
-            chef = info(target['session'], target['chef'])
-            labels = chef.get('labels') or {}
-            expected = {'ltc.chef.registry': token, 'ltc.chef.project': str(project_id), 'herdr.space': target['space']}
-            if chef.get('address') != target['chef'] or chef.get('state') != 'live' or any(labels.get(k) != v for k, v in expected.items()):
-                break
+            session, chef = verified_chef(conn, project_id)
             details = '; '.join(f"run {event['run_id']}, {event['state']}" for event in batch)
             message = (f"Cook events: {details}. Check ltc-status and the Cook's report; "
                        "this event does not confirm task completion.")
-            call_hc(target['session'], 'send', target['chef'], message, timeout=75)
+            call_hc(session, 'send', chef, message, timeout=75)
         except (OSError, ValueError, subprocess.SubprocessError):
             break
         conn.executemany('UPDATE watch_events SET delivered = 1 WHERE id = ?', [(event['id'],) for event in batch])

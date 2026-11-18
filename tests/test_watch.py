@@ -89,6 +89,22 @@ elif args[0]=='send':
         self.assertEqual(len(self.sends()), 3)
         self.assertTrue(all('does not confirm task completion' in c[-1] for c in self.sends()))
 
+    def test_relocation_waits_for_chef_in_new_space(self):
+        self.assertEqual(self.command('start', 'app').returncode, 0)
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE projects SET space='new' WHERE id=1")
+        self.update_cook('blocked')
+        self.scan()
+        self.assertEqual(self.sends(), [])
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(conn.execute('SELECT delivered FROM watch_events').fetchall(), [(0,)])
+        (self.root / 'chef').write_text(json.dumps({
+            'address': 't-chef', 'state': 'live', 'labels': {'herdr.space': 'new'}}))
+        self.assertEqual(self.command('start', 'app').returncode, 0)
+        self.scan()
+        self.scan()
+        self.assertEqual(len(self.sends()), 1)
+
     def test_refuses_wrong_chef_identity(self):
         self.assertEqual(self.command('start', 'app').returncode, 0)
         p = self.root / 'chef'
