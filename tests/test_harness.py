@@ -87,6 +87,16 @@ else:
             self.assertTrue(argv[-1].startswith('\n@file'))
         self.assertFalse(list(self.project.rglob('injected')))
 
+    def test_dispatch_rejects_terminal_task_status_before_allocation(self):
+        for status in ('done', 'cancelled'):
+            self.call('ltc-db', 'task', 'update', '1', '--status', status)
+            self.assertIn('cannot be dispatched', self.launch(ok=False))
+            self.assertIn('cannot be dispatched', self.call(
+                'ltc', '--project', str(self.project), '--task', 'brief', '--space', 'sp',
+                '--task-id', '1', '--name', 'direct', ok=False))
+        self.assertEqual(self.call('ltc-db', 'run', 'list'), [])
+        self.assertFalse((self.project / '.letthemcook').exists())
+
     def test_dispatch_and_resume_reject_stale_callbacks(self):
         launch = self.launch('first')
         original = json.loads(self.env['TEST_CHEF'])

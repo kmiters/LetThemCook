@@ -61,10 +61,12 @@ def main():
             raise ValueError(f'Registry not found: {db_path}')
         conn = connect(db_path)
         conn.execute('BEGIN IMMEDIATE')
-        ensure_runs(conn)
-        row = conn.execute('SELECT projects.id, projects.path, projects.space, tasks.title FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (args.task_id,)).fetchone()
+        row = conn.execute('SELECT projects.id, projects.path, projects.space, tasks.title, tasks.status FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (args.task_id,)).fetchone()
         if row is None or row[2] != args.space:
             raise ValueError('Task, project checkout and Space do not match the registry')
+        if row[4] in ('done', 'cancelled'):
+            raise ValueError('A finished or cancelled task cannot be dispatched')
+        ensure_runs(conn)
         member = member_for_task(conn, row[0], args.task_id)
         checkout = checked_member_path(member, row[1]) if member else Path(row[1]).resolve()
         if project != checkout:
