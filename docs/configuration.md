@@ -15,7 +15,15 @@ Run `bin/ltc-chef` to sync all registered projects, or `bin/ltc-chef my-app` for
 
 For ongoing Space synchronization, run `bin/ltc-chef --watch` in a persistent terminal. It runs the same sync every 15 seconds. Use `--interval SECONDS` to change the cadence. Restart it if it exits. This loop discovers open Spaces and checks for Chef tabs. Use the [project watcher](operations.md#cook-watcher) for Cook supervision.
 
-By default, new Codex Chefs use `tui.fullscreen_transcript=true` and `tui.collapse_turn_details=true`. Expand a turn summary to inspect its tool output. Run `bin/ltc-chef --use-codex-display-settings my-app` to use your own display settings when a fresh tab is launched. This switch also works with `--watch`. [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+By default, new Codex Chefs use `tui.fullscreen_transcript=true` and `tui.collapse_turn_details=true`. Expand a turn summary to inspect its tool output. Run `bin/ltc-chef --use-codex-display-settings my-app` to use your own display settings when a fresh tab is launched. This switch also works with `--watch`.
+
+New Claude Code Chefs use `tui=fullscreen` and `viewMode=focus` for a quieter transcript. The launch applies these settings to that Chef only. Run `bin/ltc-chef --use-claude-display-settings my-app` to keep Claude Code's native display choices. This switch also works with `--watch`. Claude Code 2.1.327 and the current settings reference support these values. Focus view summarizes tool calls. Use `--verbose` or the normal display opt-out when you need expanded detail. [Claude Code settings reference](https://code.claude.com/docs/en/settings-reference#viewmode)
+
+New Codex and Claude Code Chef sessions receive per-launch native hooks. `SessionStart` runs for `startup` and `resume`. `PostToolUse` runs asynchronously after Bash tools and adds a bounded reminder only when the assigned registry records a new task transition to `done`. It reads task IDs and the registry event marker. It does not read raw transcripts or alter instructions. See [the lifecycle hook evidence and safety rules](operations.md#proactive-agent-instruction-maintenance).
+
+Codex receives hook definitions through per-launch `-c` overrides. Codex merges hook entries from active hook sources. It does not change `CODEX_HOME`, project settings, or user settings. On first use, inspect the definitions in `/hooks` and trust them there if you want them active. Never bypass hook trust. Codex hooks were verified with version 0.169.0. If hooks are disabled by an existing feature setting, keep that choice or review the setting deliberately. [Codex hooks reference](https://learn.chatgpt.com/docs/hooks)
+
+Claude Code receives hook definitions and display defaults through per-launch `--settings` JSON. Settings hook entries merge with existing hook sources. No settings file is written. Claude Code still applies workspace trust before running hooks. Review and trust the launch hook when prompted. Hook and display configuration was checked with version 2.1.327. [Claude Code hooks reference](https://code.claude.com/docs/en/hooks)
 
 ## Cook profiles and agent CLIs
 

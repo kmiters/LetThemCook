@@ -13,7 +13,7 @@ class ChefTest(unittest.TestCase):
     def test_sync_routes_to_space_and_avoids_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            project = root / 'project'
+            project = root / 'project-🍳'
             project.mkdir()
             subprocess.run(['git', 'init', '-q', str(project)], check=True)
             db = root / 'state.sqlite'
@@ -39,10 +39,19 @@ else:
             self.assertEqual(json.loads(first.stdout)[0]['status'], 'started')
             args = json.loads((root / 'args').read_text())
             self.assertEqual(args[args.index('--name') + 1], '👨‍🍳 Chef @ app')
-            self.assertEqual(json.loads(args[args.index('--argv') + 1]), [
+            argv = json.loads(args[args.index('--argv') + 1])
+            self.assertEqual(argv[:7], [
                 'codex', '--no-daemon', '--approve-for-me',
                 '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.collapse_turn_details=true',
             ])
+            hook_configs = [argv[i + 1] for i, value in enumerate(argv[:-1])
+                            if value == '-c' and argv[i + 1].startswith('hooks.')]
+            self.assertEqual(len(hook_configs), 2)
+            self.assertIn('hooks.SessionStart=[{matcher="^(startup|resume)$"', hook_configs[0])
+            self.assertIn('hooks.PostToolUse=[{matcher="^Bash$"', hook_configs[1])
+            self.assertIn('async=true', hook_configs[1])
+            self.assertIn(str(db.resolve()), hook_configs[0])
+            self.assertIn('🍳', hook_configs[0])
             self.assertIn('Registry: ' + str(db.resolve()), args[args.index('--task') + 1])
             self.assertEqual(args[args.index('--focus') + 1], 'false')
             self.assertEqual(args[args.index('--space') + 1], 'sp1')
@@ -55,7 +64,10 @@ else:
             (root / 'tabs').write_text('[]')
             subprocess.run(cmd + ['--use-codex-display-settings', 'app'], env=env, check=True, capture_output=True)
             args = json.loads((root / 'args').read_text())
-            self.assertEqual(json.loads(args[args.index('--argv') + 1]), ['codex', '--no-daemon', '--approve-for-me'])
+            argv = json.loads(args[args.index('--argv') + 1])
+            self.assertEqual(argv[:3], ['codex', '--no-daemon', '--approve-for-me'])
+            self.assertFalse(any(value.startswith('tui.') for value in argv))
+            self.assertIn('hooks.SessionStart=', ' '.join(argv))
 
             # Persist the preference while Codex is live. Sync must leave its tab alone.
             registry = [str(ROOT / 'bin/ltc-db'), '--db', str(db)]
@@ -72,8 +84,14 @@ else:
                     time.sleep(.05)
                 args = json.loads((root / 'args').read_text())
                 argv = json.loads(args[args.index('--argv') + 1])
-                self.assertEqual(argv[:-1], [str(root / 'claude'), '--'])
-                self.assertIn('Project name: app', argv[-1])
+                self.assertEqual(argv[0], str(root / 'claude'))
+                settings = json.loads(argv[2])
+                self.assertEqual(settings['tui'], 'fullscreen')
+                self.assertEqual(settings['viewMode'], 'focus')
+                self.assertEqual(settings['hooks']['SessionStart'][0]['matcher'], 'startup|resume')
+                self.assertTrue(settings['hooks']['PostToolUse'][0]['hooks'][0]['async'])
+                self.assertEqual(argv[3], '--')
+                self.assertIn('Project name: app', argv[4])
                 self.assertIn('AGENTS.md', argv[-1])
                 self.assertEqual(args[args.index('--folder') + 1], str(project.resolve()))
                 self.assertNotIn('--task', args)
@@ -81,6 +99,16 @@ else:
                 watcher.terminate()
                 watcher.communicate(timeout=5)
             self.assertEqual(json.loads(subprocess.check_output(cmd, env=env))[0]['status'], 'already_present')
+
+            (root / 'tabs').write_text('[]')
+            subprocess.run(cmd + ['--use-claude-display-settings', 'app'], env=env, check=True, capture_output=True)
+            args = json.loads((root / 'args').read_text())
+            argv = json.loads(args[args.index('--argv') + 1])
+            settings = json.loads(argv[2])
+            self.assertNotIn('tui', settings)
+            self.assertNotIn('viewMode', settings)
+            self.assertIn('SessionStart', settings['hooks'])
+            self.assertIn('PostToolUse', settings['hooks'])
 
     def test_old_database_is_migrated(self):
         import sqlite3

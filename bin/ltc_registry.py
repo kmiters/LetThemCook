@@ -50,6 +50,7 @@ def connect(path):
 
 
 BRIEF_FIELDS = ('intent', 'context', 'scope', 'acceptance', 'checks')
+INSTRUCTION_MAINTENANCE_MARKER = 'ltc-kind: instruction-maintenance'
 
 
 def ensure_briefs(conn):
@@ -58,6 +59,20 @@ def ensure_briefs(conn):
         intent TEXT NOT NULL DEFAULT '', context TEXT NOT NULL DEFAULT '',
         scope TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
         checks TEXT NOT NULL DEFAULT ''
+    )''')
+
+
+def ensure_task_status_events(conn):
+    conn.execute('''CREATE TABLE IF NOT EXISTS task_status_events (
+        id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id),
+        task_id INTEGER NOT NULL REFERENCES tasks(id), from_status TEXT NOT NULL,
+        to_status TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS task_status_events_project_id ON task_status_events(project_id, id)')
+    conn.execute('''CREATE TABLE IF NOT EXISTS chef_hook_sessions (
+        project_id INTEGER NOT NULL REFERENCES projects(id), session_id TEXT NOT NULL,
+        last_event_id INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(project_id, session_id)
     )''')
 
 

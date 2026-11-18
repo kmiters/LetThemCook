@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -17,12 +18,68 @@ def run(argv):
     return subprocess.run(argv, text=True, capture_output=True, check=True).stdout
 
 
+def toml_value(value):
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, list):
+        return '[' + ','.join(toml_value(item) for item in value) + ']'
+    if isinstance(value, dict):
+        return '{' + ','.join(f'{key}={toml_value(item)}' for key, item in value.items()) + '}'
+    raise TypeError(f'Unsupported TOML hook value: {type(value).__name__}')
+
+
+def chef_hook_command(project, db, root, event):
+    helper = ROOT / 'bin' / 'ltc_chef_hooks.py'
+    return shlex.join([sys.executable, str(helper), event, '--db', str(db),
+                       '--project', project, '--root', str(root)])
+
+
+def codex_hook_overrides(project, db, root):
+    start = {'matcher': '^(startup|resume)$', 'hooks': [{
+        'type': 'command', 'command': chef_hook_command(project, db, root, 'session-start'),
+        'timeout': 5, 'additionalContextLimit': 1200,
+    }]}
+    completion = {'matcher': '^Bash$', 'hooks': [{
+        'type': 'command', 'command': chef_hook_command(project, db, root, 'post-tool-use'),
+        'async': True, 'timeout': 5,
+    }]}
+    return [('-c', 'hooks.SessionStart=' + toml_value([start])),
+            ('-c', 'hooks.PostToolUse=' + toml_value([completion]))]
+
+
+def claude_session_settings(project, db, root, use_native_display):
+    hooks = {
+        'SessionStart': [{
+            'matcher': 'startup|resume',
+            'hooks': [{'type': 'command',
+                       'command': chef_hook_command(project, db, root, 'session-start'),
+                       'timeout': 5}],
+        }],
+        'PostToolUse': [{
+            'matcher': 'Bash',
+            'hooks': [{'type': 'command',
+                       'command': chef_hook_command(project, db, root, 'post-tool-use'),
+                       'async': True, 'timeout': 5}],
+        }],
+    }
+    settings = {'hooks': hooks}
+    if not use_native_display:
+        settings.update(tui='fullscreen', viewMode='focus')
+    return json.dumps(settings, separators=(',', ':'))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', default=os.environ.get('LTC_DB', str(ROOT / '.letthemcook' / 'registry.sqlite3')))
     parser.add_argument('--watch', action='store_true', help='Keep synchronizing open Spaces')
     parser.add_argument('--use-codex-display-settings', action='store_true',
                         help='Use your Codex transcript and folding settings for new Chefs')
+    parser.add_argument('--use-claude-display-settings', action='store_true',
+                        help='Use your Claude Code transcript and renderer settings for new Chefs')
     parser.add_argument('--interval', type=int, default=15, help='Watch interval in seconds (default: 15)')
     parser.add_argument('project', nargs='?', help='Only synchronize this project')
     args = parser.parse_args()
@@ -32,6 +89,8 @@ def main():
         command = [sys.executable, str(Path(__file__).resolve()), '--db', args.db]
         if args.use_codex_display_settings:
             command.append('--use-codex-display-settings')
+        if args.use_claude_display_settings:
+            command.append('--use-claude-display-settings')
         if args.project:
             command.append(args.project)
         try:
@@ -85,17 +144,21 @@ def main():
                     if not executable:
                         raise ValueError('Claude Code executable was not found on PATH')
                     prompt += '\nRead applicable AGENTS.md and CLAUDE.md files in the assigned checkout.'
-                    argv = [executable, '--', prompt]
+                    settings = claude_session_settings(project['name'], Path(args.db).expanduser().resolve(), path,
+                                                       args.use_claude_display_settings)
+                    argv = [executable, '--settings', settings, '--', prompt]
                 elif harness == 'codex':
                     argv = ['codex', '--no-daemon', '--approve-for-me']
                     if not args.use_codex_display_settings:
                         argv += ['-c', 'tui.fullscreen_transcript=true', '-c', 'tui.collapse_turn_details=true']
+                    for option in codex_hook_overrides(project['name'], Path(args.db).expanduser().resolve(), path):
+                        argv.extend(option)
                     task = ['--task', prompt]
                 else:
                     raise ValueError('Unknown project Chef harness')
                 output = run(['herdr-app', 'do', 'tab.new', '--name', name, '--space', space_id,
                               '--folder', str(path), '--argv', json.dumps(argv), *task, '--focus', 'false'])
-                report.update(harness=harness, readiness='Awaiting Chef registration. Check the tab for trust or sign-in prompts.')
+                report.update(harness=harness, readiness='Awaiting Chef registration. Review and trust native hooks only if desired. Check hook, workspace trust, or sign-in prompts.')
                 report.update(status='started', result=json.loads(output))
         except (ValueError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
             report.update(status='error', error=str(error), detail=getattr(error, 'stderr', None))

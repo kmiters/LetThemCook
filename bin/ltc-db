@@ -9,7 +9,8 @@ import subprocess
 import sys
 
 from ltc_workspace import check_single_checkout, ensure_members, members_for, workspace_checkouts
-from ltc_registry import BRIEF_FIELDS, ensure_briefs, ensure_runs, get_brief, task_reports
+from ltc_registry import (BRIEF_FIELDS, ensure_briefs, ensure_runs,
+                          ensure_task_status_events, get_brief, task_reports)
 
 ROOT = Path(__file__).resolve().parent.parent
 STATUSES = ('todo', 'in_progress', 'blocked', 'done', 'cancelled')
@@ -97,6 +98,7 @@ def main():
         conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS projects_space ON projects(space)')
         ensure_runs(conn)
         ensure_briefs(conn)
+        ensure_task_status_events(conn)
         ensure_members(conn)
 
         def project_id(name):
@@ -199,13 +201,16 @@ def main():
         elif args.action == 'show':
             result = task_row(args.id)
         else:
-            task_row(args.id)
+            existing_task = task_row(args.id)
             updates = {k: getattr(args, k) for k in ('title', 'description', 'status') if getattr(args, k) is not None}
             brief_updates = {key: getattr(args, key) for key in BRIEF_FIELDS if getattr(args, key) is not None}
             if not updates and not brief_updates:
                 raise ValueError('Specify a task or brief field to update')
             assignment = ', '.join(k + ' = ?' for k in updates)
             conn.execute('UPDATE tasks SET ' + (assignment + ', ' if assignment else '') + 'updated_at = CURRENT_TIMESTAMP WHERE id = ?', (*updates.values(), args.id))
+            if updates.get('status') == 'done' and existing_task['status'] != 'done':
+                conn.execute('INSERT INTO task_status_events(project_id, task_id, from_status, to_status) VALUES (?, ?, ?, ?)',
+                             (existing_task['project_id'], args.id, existing_task['status'], 'done'))
             update_brief(args.id, brief_updates)
             result = task_row(args.id)
         print(json.dumps(result, ensure_ascii=False))
