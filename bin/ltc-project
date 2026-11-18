@@ -2,7 +2,7 @@
 # Register a checkout and start its Chef in the selected Herdr Space.
 set -euo pipefail
 if [ "$#" -lt 3 ] || [ "${1:-}" = "--help" ]; then
-  echo "Usage: ltc-project NAME CHECKOUT SPACE_ID [DESCRIPTION] [--member NAME ...]" >&2
+  echo "Usage: ltc-project NAME CHECKOUT SPACE_ID [DESCRIPTION] [--member NAME ...] [--chef-harness codex|claude]" >&2
   exit 2
 fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -11,17 +11,17 @@ checkout="$2"
 space="$3"
 shift 3
 description=""
-if [ "$#" -gt 0 ] && [ "$1" != "--member" ]; then
+if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
   description="$1"
   shift
 fi
 register_args=(project add "$name" "$checkout" --space "$space" --description "$description")
 while [ "$#" -gt 0 ]; do
-  if [ "$1" != "--member" ] || [ "$#" -lt 2 ]; then
-    echo "Expected --member NAME" >&2
+  if [[ "$1" != "--member" && "$1" != "--chef-harness" ]] || [ "$#" -lt 2 ]; then
+    echo "Expected --member NAME or --chef-harness codex|claude" >&2
     exit 2
   fi
-  register_args+=("--member" "$2")
+  register_args+=("$1" "$2")
   shift 2
 done
 "$root/bin/ltc-db" "${register_args[@]}"

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +56,31 @@ else:
             subprocess.run(cmd + ['--use-codex-display-settings', 'app'], env=env, check=True, capture_output=True)
             args = json.loads((root / 'args').read_text())
             self.assertEqual(json.loads(args[args.index('--argv') + 1]), ['codex', '--no-daemon', '--approve-for-me'])
+
+            # Persist the preference while Codex is live. Sync must leave its tab alone.
+            registry = [str(ROOT / 'bin/ltc-db'), '--db', str(db)]
+            subprocess.run(registry + ['project', 'update', 'app', '--chef-harness', 'claude'], check=True, capture_output=True)
+            self.assertEqual(json.loads(subprocess.check_output(cmd, env=env))[0]['status'], 'already_present')
+            (root / 'claude').symlink_to('/usr/bin/false')
+            (root / 'tabs').write_text('[]')
+            (root / 'args').unlink()
+            watcher = subprocess.Popen(cmd + ['--watch', '--interval', '1'], env=env, stdout=subprocess.PIPE)
+            try:
+                for _ in range(100):
+                    if (root / 'args').exists():
+                        break
+                    time.sleep(.05)
+                args = json.loads((root / 'args').read_text())
+                argv = json.loads(args[args.index('--argv') + 1])
+                self.assertEqual(argv[:-1], [str(root / 'claude'), '--'])
+                self.assertIn('Project name: app', argv[-1])
+                self.assertIn('AGENTS.md', argv[-1])
+                self.assertEqual(args[args.index('--folder') + 1], str(project.resolve()))
+                self.assertNotIn('--task', args)
+            finally:
+                watcher.terminate()
+                watcher.communicate(timeout=5)
+            self.assertEqual(json.loads(subprocess.check_output(cmd, env=env))[0]['status'], 'already_present')
 
     def test_old_database_is_migrated(self):
         import sqlite3

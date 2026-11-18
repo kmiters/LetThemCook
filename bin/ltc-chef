@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Start one project Chef in each registered, open Herdr Space."""
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -40,6 +42,10 @@ def main():
             return 0
     registry = [str(ROOT / 'bin' / 'ltc-db'), '--db', args.db, 'project']
     projects = [json.loads(run(registry + ['show', args.project]))] if args.project else json.loads(run(registry + ['list']))
+    # Serialize the tab lookup and creation across one-shot and watch invocations.
+    lock_path = Path(args.db).expanduser().resolve()
+    lock = lock_path.with_name(lock_path.name + '.chef.lock').open('a')
+    fcntl.flock(lock, fcntl.LOCK_EX)
     spaces = {s['id']: s for s in json.loads(run(['herdr-app', 'ls']))['spaces']}
     reports = []
     failed = False
@@ -72,11 +78,24 @@ def main():
                                + '\nProject description: ' + project['description']
                                + '\nRegistered member checkouts:\n'
                                + '\n'.join(f"- {m['name']}: {m['path']}" for m in project['members']))
-                argv = ['codex', '--no-daemon', '--approve-for-me']
-                if not args.use_codex_display_settings:
-                    argv += ['-c', 'tui.fullscreen_transcript=true', '-c', 'tui.collapse_turn_details=true']
+                harness = project['chef_harness']
+                task = []
+                if harness == 'claude':
+                    executable = shutil.which('claude')
+                    if not executable:
+                        raise ValueError('Claude Code executable was not found on PATH')
+                    prompt += '\nRead applicable AGENTS.md and CLAUDE.md files in the assigned checkout.'
+                    argv = [executable, '--', prompt]
+                elif harness == 'codex':
+                    argv = ['codex', '--no-daemon', '--approve-for-me']
+                    if not args.use_codex_display_settings:
+                        argv += ['-c', 'tui.fullscreen_transcript=true', '-c', 'tui.collapse_turn_details=true']
+                    task = ['--task', prompt]
+                else:
+                    raise ValueError('Unknown project Chef harness')
                 output = run(['herdr-app', 'do', 'tab.new', '--name', name, '--space', space_id,
-                              '--folder', str(path), '--argv', json.dumps(argv), '--task', prompt, '--focus', 'false'])
+                              '--folder', str(path), '--argv', json.dumps(argv), *task, '--focus', 'false'])
+                report.update(harness=harness, readiness='Awaiting Chef registration. Check the tab for trust or sign-in prompts.')
                 report.update(status='started', result=json.loads(output))
         except (ValueError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
             report.update(status='error', error=str(error), detail=getattr(error, 'stderr', None))

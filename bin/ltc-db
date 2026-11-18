@@ -32,6 +32,7 @@ def main():
     p.add_argument('--member', action='append', metavar='NAME', help='Register a direct child Git checkout (repeat for each workspace member)')
     p.add_argument('--description', default='')
     p.add_argument('--space', help='Herdr Space ID')
+    p.add_argument('--chef-harness', choices=('codex', 'claude'))
     project.add_parser('list')
     p = project.add_parser('show')
     p.add_argument('name')
@@ -39,6 +40,7 @@ def main():
     p.add_argument('name')
     p.add_argument('--path')
     p.add_argument('--space', help='Herdr Space ID')
+    p.add_argument('--chef-harness', choices=('codex', 'claude'))
     p.add_argument('--description')
     task = commands.add_parser('task').add_subparsers(dest='action', required=True)
     p = task.add_parser('add')
@@ -90,6 +92,8 @@ def main():
         columns = {row['name'] for row in conn.execute('PRAGMA table_info(projects)')}
         if 'space' not in columns:
             conn.execute('ALTER TABLE projects ADD COLUMN space TEXT')
+        if 'chef_harness' not in columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN chef_harness TEXT NOT NULL DEFAULT 'codex'")
         conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS projects_space ON projects(space)')
         ensure_runs(conn)
         ensure_briefs(conn)
@@ -130,7 +134,7 @@ def main():
                     path, members = workspace_checkouts(conn, args.path, args.member)
                 else:
                     path, members = check_single_checkout(conn, args.path), []
-                inserted = conn.execute('INSERT INTO projects (name, path, description, space) VALUES (?, ?, ?, ?)', (args.name, path, args.description, nonempty(args.space) if args.space is not None else None))
+                inserted = conn.execute('INSERT INTO projects (name, path, description, space, chef_harness) VALUES (?, ?, ?, ?, ?)', (args.name, path, args.description, nonempty(args.space) if args.space is not None else None, args.chef_harness or 'codex'))
                 conn.executemany('INSERT INTO project_members (project_id, name, path, common_dir) VALUES (?, ?, ?, ?)',
                                  [(inserted.lastrowid, *member) for member in members])
                 result = project_info(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
@@ -141,9 +145,9 @@ def main():
                 result = project_info(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
             else:
                 project_id(args.name)
-                updates = {k: getattr(args, k) for k in ('path', 'description', 'space') if getattr(args, k) is not None}
+                updates = {k: getattr(args, k) for k in ('path', 'description', 'space', 'chef_harness') if getattr(args, k) is not None}
                 if not updates:
-                    raise ValueError('Specify --path, --space or --description')
+                    raise ValueError('Specify --path, --space, --description or --chef-harness')
                 if 'path' in updates:
                     if members_for(conn, project_id(args.name)):
                         raise ValueError('Workspace roots and member paths are fixed at registration')
