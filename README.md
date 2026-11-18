@@ -61,7 +61,7 @@ bin/ltc-tasks --no-open p0werusers
 bin/ltc-tasks --db /path/to/registry.sqlite3 --no-open
 ```
 
-The five columns use the existing task statuses. Open a ticket to read its brief and notes, or **All projects** to switch boards. The board checks for changes every ten seconds while visible. All views are read-only.
+The board shows four columns: To do, In progress, Blocked and Done. Cancelled tasks count toward the project total and remain accessible by ticket URL, but have no board column. Open a ticket to read its brief and notes, or **All projects** to switch boards. The board checks for changes every ten seconds while visible. All views are read-only.
 
 The launcher reads the registry selected by `--db`, then `LTC_DB`, then the default beside the LetThemCook installation. It matches the current Git checkout or a unique registered checkout sharing its Git worktrees. An unknown or ambiguous checkout opens the project index. An explicit project name takes priority. A missing registry produces an error.
 
