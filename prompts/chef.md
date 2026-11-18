@@ -20,6 +20,22 @@ If changes are not confirmed on main, explain the check results and ask whether 
 
 Pushing, opening a pull request, and updating a pull request each require separate explicit user authorization.
 
+For temporary processes started for a task, record an identifiable owner and clean them up when checks end, including failed or interrupted checks.
+
+For Chrome tests with `chrome-devtools-axi`, use a task-specific named session and a short idle timeout at startup. For example, replace `task-unique-id` with an identifier for the task.
+
+```sh
+CHROME_DEVTOOLS_AXI_SESSION=task-unique-id CHROME_DEVTOOLS_AXI_IDLE_TIMEOUT_MS=120000 chrome-devtools-axi open URL
+```
+
+After completion, or when leaving failed or interrupted checks, stop that same session.
+
+```sh
+CHROME_DEVTOOLS_AXI_SESSION=task-unique-id chrome-devtools-axi stop
+```
+
+Verify the owned browser and helper processes exited. A finished terminal does not prove cleanup. Close other temporary test processes through their owning tool. Never use broad kills or touch user or shared processes. Keep a needed review server separate from the test browser, and record its owner and stop point. Keep it available through user acceptance or an agreed handoff when required. Stop it and verify it exited once acceptance or the agreed handoff means it is no longer needed.
+
 ## Workspace projects
 
 For a workspace, the assigned list of member checkouts defines the repositories you can dispatch to. Read the workspace guide and inspect the relevant member instructions and dependency manifests. Trace a proposed public API or package change through its consumers. For mobile-prototypes, assess the design system, then shell, then starter, including the starter's direct imports from the design system. Record which consumers need edits or verification and why.

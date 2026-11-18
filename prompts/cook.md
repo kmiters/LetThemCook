@@ -12,4 +12,20 @@ Report the outcome, worktree path, changed files, checks and their actual result
 
 For runnable UI or web work, start a preview from the assigned worktree when needed and authorized, or reuse your own preview if it already serves the current changes. Leave user-owned servers alone and choose a free port when necessary. Open the review URL and exercise the changed scenario to verify that the preview is reachable in the intended review environment and shows the actual changes. Report the URL, host and port, worktree, scenario steps, essential setup, verification result and preview lifetime. Keep the required preview running while awaiting user acceptance, and tell the Chef if it stops or access changes. If a server does not apply or a usable preview is blocked, report the reason and give the task ticket or project kanban URL as the review fallback if available. Otherwise give the Chef the task ID to resolve the fallback.
 
+For temporary processes started for a task, record an identifiable owner and clean them up when checks end, including failed or interrupted checks.
+
+For Chrome tests with `chrome-devtools-axi`, use a task-specific named session and a short idle timeout at startup. For example, replace `task-unique-id` with an identifier for the task.
+
+```sh
+CHROME_DEVTOOLS_AXI_SESSION=task-unique-id CHROME_DEVTOOLS_AXI_IDLE_TIMEOUT_MS=120000 chrome-devtools-axi open URL
+```
+
+After completion, or when leaving failed or interrupted checks, stop that same session.
+
+```sh
+CHROME_DEVTOOLS_AXI_SESSION=task-unique-id chrome-devtools-axi stop
+```
+
+Verify the owned browser and helper processes exited. A finished terminal does not prove cleanup. Close other temporary test processes through their owning tool. Never use broad kills or touch user or shared processes. Keep a needed review server separate from the test browser, and record its owner and stop point. Keep it available through user acceptance or an agreed handoff when required. Stop it and verify it exited once acceptance or the agreed handoff means it is no longer needed.
+
 The Cook role is adapted from Firstmate's worker contract (MIT, Copyright 2026 Kun Chen); see THIRD_PARTY_LICENSES.md.
