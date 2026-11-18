@@ -1,0 +1,218 @@
+"""Local read-only HTTP view over the Chef registry."""
+from collections import Counter
+from contextlib import closing
+from hashlib import sha256
+from html import escape
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+
+from ltc_registry import get_brief
+
+ASSETS = Path(__file__).resolve().parent.parent / 'board'
+LANES = {'todo': 'To do', 'in_progress': 'In progress', 'blocked': 'Blocked',
+         'done': 'Done', 'cancelled': 'Cancelled'}
+BRIEF = {'intent': 'User request', 'context': 'Context', 'scope': 'Scope',
+         'acceptance': 'Acceptance criteria', 'checks': 'Verification'}
+
+
+def connect(db):
+    if not db.is_file():
+        raise ValueError(f'Registry unavailable at {db}. Set LTC_DB or pass --db to select an existing registry.')
+    conn = sqlite3.connect(db.as_uri() + '?mode=ro', uri=True, timeout=2)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA query_only=ON')
+    conn.execute('BEGIN')
+    return conn
+
+
+def database_key(db):
+    return sha256(os.fsencode(db)).hexdigest()
+
+
+def list_projects(conn):
+    return conn.execute('SELECT * FROM projects ORDER BY name COLLATE NOCASE, id').fetchall()
+
+
+def git_path(directory, option):
+    result = subprocess.run(['git', '-C', str(directory), 'rev-parse', option],
+                            text=True, capture_output=True)
+    if result.returncode == 0:
+        return (directory / result.stdout.rstrip('\n')).resolve()
+    return None
+
+
+def checkout_matches(projects, cwd):
+    top = git_path(cwd, '--show-toplevel')
+    if not top:
+        return []
+    exact = [p['id'] for p in projects if Path(p['path']).resolve() == top]
+    if exact:
+        return exact
+    common = git_path(top, '--git-common-dir')
+    return [p['id'] for p in projects if common and git_path(Path(p['path']), '--git-common-dir') == common]
+
+
+def select_project(conn, name, cwd):
+    projects = list_projects(conn)
+    if name is not None:
+        for project in projects:
+            if project['name'] == name:
+                return project
+        raise ValueError(f'Unknown project {name!r}. Available: ' + ', '.join(p['name'] for p in projects))
+    # Workspace-aware installations share the resolver with the other Chef tools.
+    try:
+        from ltc_workspace import matching_project_ids
+    except ModuleNotFoundError as error:
+        if error.name != 'ltc_workspace':
+            raise
+        matches = checkout_matches(projects, cwd)
+    else:
+        matches = matching_project_ids(conn, cwd)
+    if len(matches) == 1:
+        return next((p for p in projects if p['id'] == matches[0]), None)
+    return None
+
+
+def page(title, body):
+    # Embed a revision of the full view, including task details and project navigation.
+    revision = sha256(body.encode()).hexdigest()
+    return f'''<!doctype html>
+<html lang="en" data-revision="{revision}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{escape(title)} · LetThemCook</title><link rel="icon" href="data:,">
+<link rel="stylesheet" href="/board.css"><script defer src="/board.js"></script></head>
+<body><header class="mast"><a class="brand" href="/"><i class="mark" aria-hidden="true">≋</i>LetThemCook</a>
+<a class="all-projects" href="/">All projects <span aria-hidden="true">↗</span></a></header>
+<main>{body}</main><footer><span>LetThemCook <b>/</b> Chef registry</span>
+<span id="sync" role="status">Read-only view</span></footer></body></html>''', revision
+
+
+def index(conn):
+    rows = conn.execute("""SELECT p.id, p.name, p.description, COUNT(t.id) AS total
+                           FROM projects p LEFT JOIN tasks t ON p.id = t.project_id
+                           GROUP BY p.id ORDER BY p.name COLLATE NOCASE, p.id""")
+    links = ''.join(f'''<a class="project-link" href="/projects/{p['id']}">
+<span><strong>{escape(p['name'])}</strong><small>{escape(p['description'])}</small></span>
+<span class="mono">{p['total']} tasks ↗</span></a>''' for p in rows)
+    return page('Projects', '<p class="eyebrow">Chef registry</p><h1>Projects</h1>' +
+                (links or '<p class="notice">No projects yet. Register a checkout with ltc-project to see its board here.</p>'))
+
+
+def card(task, base):
+    preview = (task['preview'] or task['description']).strip()
+    excerpt = escape(preview[:160] + ('…' if len(preview) > 160 else ''))
+    return f'''<a class="ticket" href="{base}/tasks/{task['id']}">
+<span class="ticket-top"><span>№ {task['id']:03d}</span><span class="arrow" aria-hidden="true">↗</span></span>
+<strong>{escape(task['title'])}</strong>{f'<p>{excerpt}</p>' if excerpt else ''}
+<span class="stamp">Updated {escape(task['updated_at'][:10])}</span></a>'''
+
+
+def board(conn, p, base):
+    has_briefs = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_briefs'").fetchone()
+    preview = 'b.intent' if has_briefs else "''"
+    join = 'LEFT JOIN task_briefs b ON b.task_id = t.id' if has_briefs else ''
+    tasks = conn.execute(f"""SELECT t.*, {preview} AS preview FROM tasks t {join}
+                             WHERE t.project_id = ? ORDER BY t.updated_at DESC, t.id DESC""", (p['id'],)).fetchall()
+    counts = Counter(t['status'] for t in tasks)
+    lanes = []
+    for status, label in LANES.items():
+        cards = ''.join(card(t, base) for t in tasks if t['status'] == status)
+        lanes.append(f'''<section class="lane {status}"><h2><i class="dot"></i>{label}
+<span class="count">{counts[status]}</span></h2>{cards or '<p class="empty">No tasks here</p>'}</section>''')
+    name = escape(p['name'])
+    space = p['space'] if 'space' in p.keys() else None
+    context = f' <b>/</b> Space {escape(space)}' if space else ''
+    desc = f"<p class='description'>{escape(p['description'])}</p>" if p['description'] else ''
+    empty = '' if tasks else '<p class="notice">No tasks recorded yet. Tasks saved by this project’s Chef will appear here.</p>'
+    return page(p['name'], f'''<div class="hero"><div><p class="eyebrow"><i></i> Chef’s task board</p>
+<h1>{name}</h1>{desc}<div class="meta">Chef @ {name}{context}</div></div>
+<div class="tally"><strong>{len(tasks):02d}</strong><span>Registered tasks</span></div></div>
+<div class="section-heading"><h2>Task board</h2></div>{empty}
+<div class="lanes">{''.join(lanes)}</div>''')
+
+
+def detail(conn, task, project, base):
+    brief = get_brief(conn, task['id']) or {}
+    fields = [(label, brief.get(key)) for key, label in BRIEF.items()]
+    fields.append(('Additional notes', task['description']))
+    sections = ''.join(f'<section><h2>{label}</h2><p>{escape(value)}</p></section>'
+                       for label, value in fields if value and value.strip())
+    status = task['status']
+    name = escape(project['name'])
+    return page(task['title'], f'''<a class="back" href="{base}">← {name} board</a><article class="brief">
+<div class="brief-meta"><span class="eyebrow">Task № {task['id']:03d}</span>
+<span class="{escape(status)}"><i class="dot"></i>{escape(LANES.get(status, status))}</span></div>
+<h1>{escape(task['title'])}</h1><div class="meta">Chef @ {name} <b>/</b> Updated {escape(task['updated_at'])} UTC</div>
+{sections or '<p class="notice">No brief or notes recorded for this task.</p>'}</article>''')
+
+
+def lookup(conn, path):
+    if path == '/':
+        return 200, index(conn)
+    match = re.fullmatch(r'/projects/([1-9][0-9]{0,18})(?:/tasks/([1-9][0-9]{0,18}))?/?', path)
+    if match:
+        project_id, task_id = match.groups()
+        p = conn.execute('SELECT * FROM projects WHERE id = ?', (project_id,)).fetchone()
+        base = f'/projects/{project_id}'
+        if p and not task_id:
+            return 200, board(conn, p, base)
+        if p:
+            task = conn.execute('SELECT * FROM tasks WHERE project_id = ? AND id = ?', (project_id, task_id)).fetchone()
+            if task:
+                return 200, detail(conn, task, p, base)
+    return 404, page('Page unavailable', '<h1>Page unavailable</h1><p>Check the project and task address or <a href="/">choose a project</a>.</p>')
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_GET(self):
+        if self.headers.get_all('Host') != [f'127.0.0.1:{self.server.server_port}']:
+            self.send_error(403)
+            return
+        status, mime, headers = 200, 'text/plain', {}
+        path = self.path.partition('?')[0]
+        if path == '/health':
+            body = str(os.getpid()).encode()
+            headers['X-LTC-Board'] = database_key(self.server.db)
+        elif path in ('/board.css', '/board.js'):
+            body = (ASSETS / path[1:]).read_bytes()
+            mime = 'text/css' if path.endswith('css') else 'application/javascript'
+        else:
+            try:
+                with closing(connect(self.server.db)) as conn:
+                    status, (doc, revision) = lookup(conn, path)
+            except (sqlite3.Error, OSError, ValueError):
+                status = 503
+                doc, revision = page('Registry unavailable', '<h1>Registry unavailable</h1><p>Check the registry path and file permissions, then refresh.</p>')
+            body, mime = doc.encode(), 'text/html'
+            headers['ETag'] = f'"{revision}"'
+            if status == 200 and self.headers.get('If-None-Match') == headers['ETag']:
+                status, body = 304, b''
+        self.send_response(status)
+        self.send_header('Content-Type', mime + '; charset=utf-8')
+        if status != 304:
+            self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src data:; frame-ancestors 'none'; form-action 'none'; base-uri 'none'")
+        for key, value in headers.items():
+            self.send_header(key, value)
+        self.end_headers()
+        if self.command != 'HEAD' and body:
+            self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class BoardServer(ThreadingHTTPServer):
+    def __init__(self, db, port):
+        self.db = db
+        super().__init__(('127.0.0.1', port), Handler)

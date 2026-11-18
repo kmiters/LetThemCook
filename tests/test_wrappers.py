@@ -27,6 +27,7 @@ if sys.argv[1] == 'ls': print(json.dumps({'spaces':[{'id':'sp1','machine':None,'
 else: print(json.dumps({'id':'tab1'}))
 ''')
             app.chmod(0o755)
+            (root / 'codex').symlink_to('/usr/bin/false')
             hc = root / 'hc'
             hc.write_text('''#!/usr/bin/env python3
 import json, os, sys

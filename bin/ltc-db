@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 
+from ltc_workspace import check_single_checkout, ensure_members, members_for, workspace_checkouts
 from ltc_registry import BRIEF_FIELDS, ensure_briefs, ensure_runs, get_brief
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,7 +28,8 @@ def main():
     project = commands.add_parser('project').add_subparsers(dest='action', required=True)
     p = project.add_parser('add')
     p.add_argument('name', type=nonempty)
-    p.add_argument('path', help='Existing Git checkout')
+    p.add_argument('path', help='Git checkout or workspace directory')
+    p.add_argument('--member', action='append', metavar='NAME', help='Register a direct child Git checkout (repeat for each workspace member)')
     p.add_argument('--description', default='')
     p.add_argument('--space', help='Herdr Space ID')
     project.add_parser('list')
@@ -42,6 +44,7 @@ def main():
     p = task.add_parser('add')
     p.add_argument('project')
     p.add_argument('title', type=nonempty)
+    p.add_argument('--member', help='Target repository name (required for workspace tasks)')
     p.add_argument('--description', default='')
     for field in BRIEF_FIELDS:
         p.add_argument('--' + field)
@@ -65,10 +68,6 @@ def main():
     p.add_argument('id', type=int)
     args = parser.parse_args()
 
-    def checkout(path):
-        result = subprocess.run(['git', '-C', str(Path(path).expanduser()), 'rev-parse', '--show-toplevel'], text=True, capture_output=True, check=True)
-        return str(Path(result.stdout.strip()).resolve())
-
     db = Path(args.db).expanduser().resolve()
     db.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db, timeout=10) as conn:
@@ -87,12 +86,14 @@ def main():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         ''')
+        conn.execute('BEGIN IMMEDIATE')
         columns = {row['name'] for row in conn.execute('PRAGMA table_info(projects)')}
         if 'space' not in columns:
             conn.execute('ALTER TABLE projects ADD COLUMN space TEXT')
         conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS projects_space ON projects(space)')
         ensure_runs(conn)
         ensure_briefs(conn)
+        ensure_members(conn)
 
         def project_id(name):
             row = conn.execute('SELECT id FROM projects WHERE name = ?', (name,)).fetchone()
@@ -100,8 +101,17 @@ def main():
                 raise ValueError(f'Project not found: {name}')
             return row['id']
 
+        def project_info(row):
+            project = dict(row)
+            project['members'] = members_for(conn, project['id'])
+            return project
+
+        task_query = """SELECT tasks.*, projects.name AS project, m.name AS member
+            FROM tasks JOIN projects ON projects.id = tasks.project_id
+            LEFT JOIN project_members m ON m.id = tasks.member_id"""
+
         def task_row(task_id):
-            row = conn.execute('SELECT tasks.*, projects.name AS project FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (task_id,)).fetchone()
+            row = conn.execute(task_query + ' WHERE tasks.id = ?', (task_id,)).fetchone()
             if row is None:
                 raise ValueError(f'Task not found: {task_id}')
             task = dict(row)
@@ -116,26 +126,35 @@ def main():
 
         if args.command == 'project':
             if args.action == 'add':
-                conn.execute('INSERT INTO projects (name, path, description, space) VALUES (?, ?, ?, ?)', (args.name, checkout(args.path), args.description, nonempty(args.space) if args.space is not None else None))
-                result = dict(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
+                if args.member:
+                    path, members = workspace_checkouts(conn, args.path, args.member)
+                else:
+                    path, members = check_single_checkout(conn, args.path), []
+                inserted = conn.execute('INSERT INTO projects (name, path, description, space) VALUES (?, ?, ?, ?)', (args.name, path, args.description, nonempty(args.space) if args.space is not None else None))
+                conn.executemany('INSERT INTO project_members (project_id, name, path, common_dir) VALUES (?, ?, ?, ?)',
+                                 [(inserted.lastrowid, *member) for member in members])
+                result = project_info(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
             elif args.action == 'list':
-                result = [dict(row) for row in conn.execute('SELECT * FROM projects ORDER BY name')]
+                result = [project_info(row) for row in conn.execute('SELECT * FROM projects ORDER BY name')]
             elif args.action == 'show':
                 project_id(args.name)
-                result = dict(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
+                result = project_info(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
             else:
                 project_id(args.name)
                 updates = {k: getattr(args, k) for k in ('path', 'description', 'space') if getattr(args, k) is not None}
                 if not updates:
                     raise ValueError('Specify --path, --space or --description')
                 if 'path' in updates:
-                    updates['path'] = checkout(updates['path'])
+                    if members_for(conn, project_id(args.name)):
+                        raise ValueError('Workspace roots and member paths are fixed at registration')
+                    updates['path'] = check_single_checkout(conn, updates['path'])
                 if 'space' in updates:
                     updates['space'] = nonempty(updates['space'])
                 conn.execute('UPDATE projects SET ' + ', '.join(k + ' = ?' for k in updates) + ', updated_at = CURRENT_TIMESTAMP WHERE name = ?', (*updates.values(), args.name))
-                result = dict(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
+                result = project_info(conn.execute('SELECT * FROM projects WHERE name = ?', (args.name,)).fetchone())
         elif args.command == 'run':
-            query = 'SELECT cook_runs.*, projects.name AS project FROM cook_runs JOIN projects ON projects.id = cook_runs.project_id'
+            query = '''SELECT cook_runs.*, projects.name AS project, m.name AS member FROM cook_runs
+                JOIN projects ON projects.id = cook_runs.project_id LEFT JOIN project_members m ON m.id = cook_runs.member_id'''
             if args.action == 'show':
                 row = conn.execute(query + ' WHERE cook_runs.id = ?', (args.id,)).fetchone()
                 if row is None:
@@ -152,7 +171,15 @@ def main():
                     values.append(args.task)
                 result = [dict(row) for row in conn.execute(query + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY cook_runs.id', values)]
         elif args.action == 'add':
-            cur = conn.execute('INSERT INTO tasks (project_id, title, description) VALUES (?, ?, ?)', (project_id(args.project), args.title, args.description))
+            pid = project_id(args.project)
+            members = members_for(conn, pid)
+            member_id = next((m['id'] for m in members if m['name'] == args.member), None)
+            if members and member_id is None:
+                raise ValueError('Select a registered repository with --member: ' + ', '.join(m['name'] for m in members))
+            if not members and args.member is not None:
+                raise ValueError('--member is only valid for a workspace')
+            cur = conn.execute('INSERT INTO tasks (project_id, title, description, member_id) VALUES (?, ?, ?, ?)',
+                               (pid, args.title, args.description, member_id))
             update_brief(cur.lastrowid, {key: getattr(args, key) for key in BRIEF_FIELDS if getattr(args, key) is not None})
             result = task_row(cur.lastrowid)
         elif args.action == 'list':
@@ -163,8 +190,7 @@ def main():
             if args.status:
                 values.append(args.status)
                 where.append('tasks.status = ?')
-            query = 'SELECT tasks.*, projects.name AS project FROM tasks JOIN projects ON projects.id = tasks.project_id'
-            result = [dict(row) for row in conn.execute(query + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY tasks.id', values)]
+            result = [dict(row) for row in conn.execute(task_query + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY tasks.id', values)]
         elif args.action == 'show':
             result = task_row(args.id)
         else:

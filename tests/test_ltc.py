@@ -21,6 +21,7 @@ class LaunchTest(unittest.TestCase):
             subprocess.run(['git', '-C', str(project), 'add', 'tracked'], check=True)
             subprocess.run(['git', '-C', str(project), 'commit', '-qm', 'base'], check=True)
             (project / 'tracked').write_text('uncommitted')
+            (root / 'codex').symlink_to('/usr/bin/false')
             hc = root / 'hc'
             hc.write_text('#!/bin/sh\nprintf \'{"address":"t-test"}\\n\'\n')
             hc.chmod(0o755)

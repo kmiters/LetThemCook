@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Create an isolated Cook worktree and launch it in Herdr Desktop."""
 import argparse
+from dataclasses import asdict
 import json
 import os
 import re
@@ -9,7 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ltc_registry import connect, ensure_runs, terminal_name
+from ltc_harness import EFFORTS, resolve_route
+from ltc_workspace import check_member_worktree, checked_member_path, member_for_task, member_prompt
+from ltc_registry import connect, ensure_runs, start_run, terminal_name
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -23,6 +26,7 @@ def main():
     parser.add_argument('--project', required=True, help='Project Git checkout')
     parser.add_argument('--space', required=True, help='Herdr Desktop space ID')
     parser.add_argument('--name', required=True, help='Unique task name')
+    parser.add_argument('--harness', choices=EFFORTS, help='Cook CLI (default from config, otherwise codex)')
     parser.add_argument('--profile', help='Configured Cook model profile')
     parser.add_argument('--task', required=True, help='Self-contained task brief')
     parser.add_argument('--base', default='HEAD', help='Committed base (default: HEAD)')
@@ -36,13 +40,8 @@ def main():
 
     config_path = Path(args.config).resolve()
     config = json.loads(config_path.read_text())
-    profile_name = args.profile or config['default_profile']
-    profile = config['profiles'][profile_name]
-    model, effort = profile.get('model'), profile.get('reasoning_effort')
-    if model is not None and (not isinstance(model, str) or not model.strip()):
-        raise ValueError('profile model must be a non-empty string or null')
-    if effort not in (None, 'low', 'medium', 'high', 'xhigh'):
-        raise ValueError('invalid reasoning_effort')
+    route = resolve_route(config, args.profile or config['default_profile'],
+                          args.harness or config.get('default_harness', 'codex'))
     cook_prompt = (config_path.parent / config['prompts']['cook']).resolve().read_text()
     project = Path(run(['git', '-C', args.project, 'rev-parse', '--show-toplevel']).stdout.strip()).resolve()
     base = run(['git', '-C', str(project), 'rev-parse', '--verify', '--end-of-options', args.base + '^{commit}']).stdout.strip()
@@ -51,20 +50,36 @@ def main():
         raise ValueError(f'Worktree already exists: {target}; inspect it instead of retrying')
     changes = run(['git', '-C', str(project), 'status', '--porcelain']).stdout
 
+    prompt = cook_prompt + '\n\n# Task\n' + args.task + '\n\nYour worktree: ' + str(target)
     conn = None
     run_id = None
+    member = None
     if args.task_id is not None:
         db_path = Path(args.db).expanduser().resolve()
         if not db_path.is_file():
             raise ValueError(f'Registry not found: {db_path}')
         conn = connect(db_path)
+        conn.execute('BEGIN IMMEDIATE')
         ensure_runs(conn)
         row = conn.execute('SELECT projects.id, projects.path, projects.space, tasks.title FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (args.task_id,)).fetchone()
-        if row is None or Path(row[1]).resolve() != project or row[2] != args.space:
+        if row is None or row[2] != args.space:
             raise ValueError('Task, project checkout and Space do not match the registry')
-        cursor = conn.execute('INSERT INTO cook_runs (task_id, project_id, space, worktree, base, hc_session, name, profile, launch_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                              (args.task_id, row[0], args.space, str(target), base, os.environ.get('HC_SESSION') or 'default', args.name, profile_name, 'starting'))
-        run_id = cursor.lastrowid
+        member = member_for_task(conn, row[0], args.task_id)
+        checkout = checked_member_path(member, row[1]) if member else Path(row[1]).resolve()
+        if project != checkout:
+            raise ValueError('Task, project checkout and Space do not match the registry')
+        if member:
+            check_member_worktree(checkout, target)
+            prompt += member_prompt(member, row[1])
+        prompt += '\nRegistry: ' + str(db_path) + '\nLetThemCook directory: ' + str(ROOT)
+    if args.chef:
+        prompt += '\nReport the outcome or blocker to the Chef using hc send ' + args.chef + '. This is the verified return address supplied by the launcher.'
+    harness_cmd = route.command(prompt)
+    if conn is not None:
+        run_id = start_run(conn, args.task_id, row[0], args.space, target, base,
+                           os.environ.get('HC_SESSION') or 'default', args.name, route)
+        if member:
+            conn.execute('UPDATE cook_runs SET member_id = ? WHERE id = ?', (member['id'], run_id))
         conn.commit()
 
     def record(state, terminal=None, detail=None):
@@ -90,27 +105,19 @@ def main():
         record('failed', detail=str(error))
         raise
 
-    prompt = cook_prompt + '\n\n# Task\n' + args.task + '\n\nYour worktree: ' + str(target)
-    if conn is not None:
-        prompt += '\nRegistry: ' + str(db_path) + '\nLetThemCook directory: ' + str(ROOT)
-    if args.chef:
-        prompt += '\nReport the outcome or blocker to the Chef using hc send ' + args.chef + '. This is the verified return address supplied by the launcher.'
     display_name = terminal_name(row[3]) if conn is not None else args.name
     cmd = ['hc', 'run', '--bg', '--name', display_name, '--cwd', str(target), '--label', 'herdr.space=' + args.space]
     if conn is not None:
         token = conn.execute('SELECT token FROM registry_identity WHERE id = 1').fetchone()[0]
         cmd += ['--label', 'ltc.registry=' + token, '--label', 'ltc.run=' + str(run_id),
                 '--label', 'ltc.task=' + str(args.task_id), '--label', 'ltc.project=' + str(row[0])]
+    if member:
+        cmd += ['--label', 'ltc.member=' + str(member['id'])]
     if args.chef:
         cmd += ['--parent', args.chef]
     else:
         cmd += ['--no-parent']
-    cmd += ['--', 'codex', '--no-daemon', '--approve-for-me']
-    if model is not None:
-        cmd += ['-m', model]
-    if effort is not None:
-        cmd += ['-c', 'model_reasoning_effort=' + json.dumps(effort)]
-    cmd.append(prompt)
+    cmd += ['--', *harness_cmd]
     try:
         launched = run(cmd)
     except (subprocess.CalledProcessError, OSError) as error:
@@ -133,7 +140,7 @@ def main():
     except sqlite3.Error as error:
         print(json.dumps({'error': 'registry_update_failed', 'run_id': run_id, 'worktree': str(target), 'herdr': herdr, 'detail': str(error)}), file=sys.stderr)
         return 1
-    print(json.dumps({'run_id': run_id, 'worktree': str(target), 'base': base, 'profile': profile_name, 'model': model, 'reasoning_effort': effort, 'uncommitted_changes_excluded': bool(changes), 'herdr': herdr}))
+    print(json.dumps({'run_id': run_id, 'worktree': str(target), 'base': base, 'member': member['name'] if member else None, **asdict(route), 'uncommitted_changes_excluded': bool(changes), 'herdr': herdr}))
     return 0
 
 

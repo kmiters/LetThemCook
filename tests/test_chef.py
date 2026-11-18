@@ -38,7 +38,12 @@ else:
             self.assertEqual(json.loads(first.stdout)[0]['status'], 'started')
             args = json.loads((root / 'args').read_text())
             self.assertEqual(args[args.index('--name') + 1], '👨‍🍳 Chef @ app')
-            self.assertEqual(json.loads(args[args.index('--argv') + 1]), ['codex', '--no-daemon', '--approve-for-me'])
+            self.assertEqual(json.loads(args[args.index('--argv') + 1]), [
+                'codex', '--no-daemon', '--approve-for-me',
+                '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.collapse_turn_details=true',
+            ])
+            self.assertIn('Registry: ' + str(db.resolve()), args[args.index('--task') + 1])
+            self.assertEqual(args[args.index('--focus') + 1], 'false')
             self.assertEqual(args[args.index('--space') + 1], 'sp1')
             self.assertEqual(args[args.index('--folder') + 1], str(project.resolve()))
             second = subprocess.run(cmd, env=env, text=True, capture_output=True, check=True)
@@ -46,6 +51,10 @@ else:
             (root / 'tabs').write_text(json.dumps([{'id': 'legacy', 'name': 'Chef @ app'}]))
             legacy = subprocess.run(cmd, env=env, text=True, capture_output=True, check=True)
             self.assertEqual(json.loads(legacy.stdout)[0], {'project': 'app', 'space': 'sp1', 'status': 'already_present', 'tabs': ['legacy']})
+            (root / 'tabs').write_text('[]')
+            subprocess.run(cmd + ['--use-codex-display-settings', 'app'], env=env, check=True, capture_output=True)
+            args = json.loads((root / 'args').read_text())
+            self.assertEqual(json.loads(args[args.index('--argv') + 1]), ['codex', '--no-daemon', '--approve-for-me'])
 
     def test_old_database_is_migrated(self):
         import sqlite3

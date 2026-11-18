@@ -1,20 +1,34 @@
 {
+  "default_harness": "codex",
   "default_profile": "default",
   "profiles": {
     "default": {
-      "description": "Use the Codex account's default model for ordinary work.",
+      "description": "Use the selected harness's startup defaults.",
       "model": null,
-      "reasoning_effort": null
+      "reasoning_effort": null,
+      "pi": {},
+      "claude": {}
     },
     "simple": {
-      "description": "Small, clearly scoped tasks; uses a faster Codex model.",
+      "description": "A bounded, repeatable edit with an obvious check.",
+      "model": "gpt-6-luna",
+      "reasoning_effort": "high",
+      "pi": {"model": "openai-codex/gpt-6-luna", "reasoning_effort": "high"},
+      "claude": {"model": "haiku"}
+    },
+    "routine": {
+      "description": "Ordinary feature implementation or a localized bug fix with tests.",
       "model": "gpt-6.2-sol",
-      "reasoning_effort": "low"
+      "reasoning_effort": "medium",
+      "pi": {"model": "openai-codex/gpt-6.1-sol", "reasoning_effort": "medium"},
+      "claude": {"model": "sonnet", "reasoning_effort": "medium"}
     },
     "complex": {
-      "description": "Complex or high-uncertainty tasks.",
+      "description": "Cross-component work, an uncertain diagnosis or difficult tradeoffs.",
       "model": "gpt-6.2-astra",
-      "reasoning_effort": "high"
+      "reasoning_effort": "high",
+      "pi": {"model": "openai-codex/gpt-6-astra", "reasoning_effort": "high"},
+      "claude": {"model": "opus", "reasoning_effort": "high"}
     }
   },
   "prompts": {

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Resume a recorded Cook in the same worktree after its terminal has finished."""
 import argparse
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
 
-from ltc_registry import format_task, get_brief, terminal_name
+from ltc_harness import CookRoute, resolve_route
+from ltc_workspace import member_for_run, member_label_matches, member_prompt
+from ltc_registry import ensure_runs, format_task, get_brief, start_run, terminal_name
 import sqlite3
 import subprocess
 import sys
@@ -42,6 +45,7 @@ def main():
     if row is None:
         raise ValueError('Run or registry identity not found')
     run = dict(row)
+    member = member_for_run(conn, run)
     task_brief = format_task({'id': run['task_id'], 'title': run['title'], 'description': run['description'], 'brief': get_brief(conn, run['task_id'])})
     if run['task_status'] in ('done', 'cancelled'):
         raise ValueError('A finished or cancelled task cannot be resumed')
@@ -54,23 +58,18 @@ def main():
         raise ValueError('A newer run exists for this worktree; inspect it instead')
     if not run['terminal']:
         raise ValueError('No recorded terminal; cannot prove the previous Cook stopped')
-    profile = config['profiles'][run['profile']]
-    model, effort = profile.get('model'), profile.get('reasoning_effort')
-    if model is not None and (not isinstance(model, str) or not model.strip()):
-        raise ValueError('profile model must be a non-empty string or null')
-    if effort not in (None, 'low', 'medium', 'high', 'xhigh'):
-        raise ValueError('invalid reasoning_effort')
     env = dict(os.environ, HC_SESSION=run['hc_session'])
     previous = json.loads(subprocess.run(['hc', 'get', run['terminal']], env=env, capture_output=True,
                                           text=True, check=True, timeout=10).stdout)
     expected = {'ltc.registry': run['token'], 'ltc.run': str(run['id']), 'ltc.task': str(run['task_id']),
                 'ltc.project': str(run['project_id']), 'herdr.space': run['space']}
     labels = previous.get('labels') or {}
-    if previous.get('address') != run['terminal'] or any(labels.get(key) != value for key, value in expected.items()):
+    if (previous.get('address') != run['terminal'] or not member_label_matches(run, labels)
+            or any(labels.get(key) != value for key, value in expected.items())):
         raise ValueError('Previous terminal identity does not match the run')
     if previous.get('state') != 'finished':
         raise ValueError('Previous terminal is not confirmed finished')
-    project = Path(run['project_path']).resolve(strict=True)
+    project = Path(member['path'] if member else run['project_path']).resolve(strict=True)
     worktree = Path(run['worktree']).resolve(strict=True)
     if worktree == project or not worktree.is_dir():
         raise ValueError('Recorded worktree is invalid')
@@ -83,29 +82,36 @@ def main():
     if Path(current_root).resolve() != worktree:
         raise ValueError('Recorded worktree is not its own Git root')
     name = terminal_name(run['title'])
-    cur = conn.execute('''INSERT INTO cook_runs (task_id, project_id, space, worktree, base, hc_session, name, profile, launch_state)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'starting')''', (run['task_id'], run['project_id'], run['space'], str(worktree),
-        run['base'], run['hc_session'], name, run['profile']))
-    new_id = cur.lastrowid
+    if run.get('harness') is None:
+        # Old runs recorded only the Codex profile name.
+        route = resolve_route(config, run['profile'], 'codex')
+    else:
+        route = CookRoute(run['profile'], run['harness'], run['model'], run['reasoning_effort'])
+    prompt = (prompt_base + '\n\n# Resumed task\n' + task_brief
+              + '\n\nThis is a fresh session continuing the same task in the existing worktree. Inspect existing changes and prior context before editing; preserve the work. Do not assume the task is complete.'
+              + '\nPrevious run ID: ' + str(run['id']) + '\nYour worktree: ' + str(worktree) + '\nRegistry: ' + str(db)
+              + '\nLetThemCook directory: ' + str(ROOT) + '\nReport the outcome or blocker to the Chef using hc send ' + chef + '.')
+    if member:
+        prompt += member_prompt(member, run['project_path'])
+    harness_cmd = route.command(prompt)
+    ensure_runs(conn)
+    new_id = start_run(conn, run['task_id'], run['project_id'], run['space'], worktree,
+                       run['base'], run['hc_session'], name, route)
+    if member:
+        conn.execute('UPDATE cook_runs SET member_id = ? WHERE id = ?', (member['id'], new_id))
     conn.commit()
 
     def record(state, terminal=None, detail=None):
         conn.execute('UPDATE cook_runs SET launch_state = ?, terminal = ?, detail = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (state, terminal, detail, new_id))
         conn.commit()
 
-    prompt = (prompt_base + '\n\n# Resumed task\n' + task_brief
-              + '\n\nThis is a fresh session continuing the same task in the existing worktree. Inspect existing changes and prior context before editing; preserve the work. Do not assume the task is complete.'
-              + '\nPrevious run ID: ' + str(run['id']) + '\nYour worktree: ' + str(worktree) + '\nRegistry: ' + str(db)
-              + '\nLetThemCook directory: ' + str(ROOT) + '\nReport the outcome or blocker to the Chef using hc send ' + chef + '.')
     cmd = ['hc', 'run', '--bg', '--name', name, '--cwd', str(worktree), '--parent', chef,
            '--label', 'herdr.space=' + run['space'], '--label', 'ltc.registry=' + run['token'],
            '--label', 'ltc.run=' + str(new_id), '--label', 'ltc.task=' + str(run['task_id']),
-           '--label', 'ltc.project=' + str(run['project_id']), '--', 'codex', '--no-daemon', '--approve-for-me']
-    if model is not None:
-        cmd += ['-m', model]
-    if effort is not None:
-        cmd += ['-c', 'model_reasoning_effort=' + json.dumps(effort)]
-    cmd.append(prompt)
+           '--label', 'ltc.project=' + str(run['project_id'])]
+    if member:
+        cmd += ['--label', 'ltc.member=' + str(member['id'])]
+    cmd += ['--', *harness_cmd]
     try:
         launch = subprocess.run(cmd, env=env, text=True, capture_output=True, check=True)
     except (OSError, subprocess.CalledProcessError) as error:
@@ -128,7 +134,7 @@ def main():
     except sqlite3.Error as error:
         print(json.dumps({'error': 'registry_update_failed', 'run_id': new_id, 'worktree': str(worktree), 'herdr': herdr, 'detail': str(error)}), file=sys.stderr)
         return 1
-    print(json.dumps({'run_id': new_id, 'previous_run_id': run['id'], 'worktree': str(worktree), 'herdr': herdr}))
+    print(json.dumps({'run_id': new_id, 'previous_run_id': run['id'], 'member': member['name'] if member else None, **asdict(route), 'worktree': str(worktree), 'herdr': herdr}))
     return 0
 
 

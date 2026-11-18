@@ -11,43 +11,114 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 
+try:
+    from ltc_workspace import member_label_matches, members_for
+except ModuleNotFoundError as error:
+    if error.name != 'ltc_workspace':
+        raise
+    members_for = None
 
-def inspect_run(run, token):
-    result = dict(run)
-    if result.pop('_verified_closed', False):
-        result['terminal_status'] = {'state': 'closed', 'reason': 'verified_close'}
-        return result
-    result['terminal_status'] = {'state': 'unknown', 'reason': 'no_recorded_terminal'}
-    if not run['terminal']:
-        return result
-    if not token:
-        result['terminal_status']['reason'] = 'no_registry_identity'
-        return result
+    def member_label_matches(run, labels):
+        # A standalone checkout can verify unlabeled legacy runs. Member
+        # identity requires the workspace module's inspection rules.
+        return run.get('member_id') is None and 'ltc.member' not in labels
+
+
+def terminal_env(run):
     env = dict(os.environ, HC_SESSION=run['hc_session'])
     env.pop('HC_SOCKET', None)
+    return env
+
+
+def inspect_terminal(run, token):
+    """Return status and terminal metadata only when the terminal identity matches."""
+    if run.get('_member_mismatch'):
+        return {'state': 'unknown', 'reason': 'task_member_mismatch'}, None
+    if run.get('_verified_closed'):
+        return {'state': 'closed', 'reason': 'verified_close'}, None
+    if not run['terminal']:
+        return {'state': 'unknown', 'reason': 'no_recorded_terminal'}, None
+    if not token:
+        return {'state': 'unknown', 'reason': 'no_registry_identity'}, None
     try:
         output = subprocess.run(['hc', 'get', run['terminal']], text=True, capture_output=True,
-                                env=env, check=True, timeout=5)
+                                env=terminal_env(run), check=True, timeout=5)
         terminal = json.loads(output.stdout)
         labels = terminal.get('labels') or {}
         expected = {'ltc.registry': token, 'ltc.run': str(run['id']),
                     'ltc.task': str(run['task_id']), 'ltc.project': str(run['project_id']),
                     'herdr.space': run['space']}
-        if terminal.get('address') != run['terminal'] or any(labels.get(k) != v for k, v in expected.items()):
-            result['terminal_status']['reason'] = 'identity_mismatch'
+        if (terminal.get('address') != run['terminal']
+                or any(labels.get(k) != v for k, v in expected.items())
+                or not member_label_matches(run, labels)):
+            reason = 'identity_mismatch'
         elif terminal.get('state') not in ('live', 'finished'):
-            result['terminal_status']['reason'] = 'unrecognized_state'
+            reason = 'unrecognized_state'
         else:
             status = terminal.get('status')
-            result['terminal_status'] = {'state': terminal['state'],
-                                         'agent': status.get('state') if isinstance(status, dict) else None}
+            agent = status.get('state') if isinstance(status, dict) else None
+            return {'state': terminal['state'],
+                    'agent': agent if isinstance(agent, str) else None}, terminal
     except subprocess.TimeoutExpired:
-        result['terminal_status']['reason'] = 'herdr_timeout'
+        reason = 'herdr_timeout'
     except (OSError, subprocess.CalledProcessError):
-        result['terminal_status']['reason'] = 'herdr_unavailable_or_terminal_missing'
-    except (ValueError, TypeError, AttributeError):
-        result['terminal_status']['reason'] = 'invalid_herdr_response'
+        reason = 'herdr_unavailable_or_terminal_missing'
+    except (ValueError, TypeError, AttributeError, RecursionError):
+        reason = 'invalid_herdr_response'
+    return {'state': 'unknown', 'reason': reason}, None
+
+
+def inspect_run(run, token):
+    result = dict(run)
+    result.pop('_verified_closed', None)
+    result.pop('_member_mismatch', None)
+    result['terminal_status'], _ = inspect_terminal(run, token)
     return result
+
+
+def read_project_status(conn, project_id, *, include_launch_settings=False):
+    """Read the registry inputs for a single project, including legacy databases."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    has_members = 'project_members' in tables
+    members = members_for(conn, project_id) if has_members and members_for is not None else []
+    task_member = ', member_id' if has_members and any(
+        row[1] == 'member_id' for row in conn.execute('PRAGMA table_info(tasks)')) else ''
+    tasks = [dict(row) for row in conn.execute(
+        f'SELECT id, title, status, updated_at{task_member} FROM tasks WHERE project_id = ? ORDER BY id',
+        (project_id,))]
+    runs = []
+    if 'cook_runs' in tables:
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(cook_runs)')}
+        optional = ', member_id' if 'member_id' in columns else ''
+        if include_launch_settings:
+            optional += ', ' + ', '.join(column if column in columns else f'NULL AS {column}'
+                                        for column in ('harness', 'model', 'reasoning_effort'))
+        verified_closed = ('EXISTS (SELECT 1 FROM closed_runs WHERE run_id = cook_runs.id)'
+                           if 'closed_runs' in tables else '0')
+        runs = [dict(row) for row in conn.execute(f'''SELECT id, task_id, project_id, space, worktree, base,
+            terminal, hc_session, name, profile, launch_state, created_at, {verified_closed} AS _verified_closed
+            {optional} FROM cook_runs WHERE project_id = ?
+            AND task_id IN (SELECT id FROM tasks WHERE project_id = ?) ORDER BY id''', (project_id, project_id))]
+    member_names = {member['id']: member['name'] for member in members}
+    for row in tasks + runs:
+        if 'member_id' in row:
+            row['member'] = member_names.get(row['member_id'])
+    if members:
+        assigned = {task['id']: task.get('member_id') for task in tasks}
+        for run in runs:
+            run['_member_mismatch'] = (run.get('member_id') not in member_names
+                                       or assigned[run['task_id']] != run.get('member_id'))
+    identity = conn.execute('SELECT token FROM registry_identity WHERE id = 1').fetchone() if 'registry_identity' in tables else None
+    return tasks, runs, identity[0] if identity else None, members
+
+
+def current_runs(tasks, runs):
+    latest = {run['task_id']: run['id'] for run in runs}
+    active = {task['id'] for task in tasks if task['status'] not in ('done', 'cancelled')}
+    # Never suppress uncertainty, live terminals, or launch failures.
+    return [run for run in runs if (run['task_id'] in active and run['id'] == latest[run['task_id']])
+            or run['terminal_status']['state'] not in ('finished', 'closed')
+            or run['launch_state'] != 'started']
 
 
 def main():
@@ -65,25 +136,13 @@ def main():
         if project is None:
             raise ValueError(f'Project not found: {args.project}')
         project = dict(project)
-        tasks = [dict(row) for row in conn.execute('SELECT id, title, status, updated_at FROM tasks WHERE project_id = ? ORDER BY id', (project['id'],))]
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        runs = ([dict(row) for row in conn.execute('''SELECT id, task_id, project_id, space, worktree, base,
-                   terminal, hc_session, name, profile, launch_state, created_at FROM cook_runs
-                   WHERE project_id = ? ORDER BY id''', (project['id'],))] if 'cook_runs' in tables else [])
-        identity = conn.execute('SELECT token FROM registry_identity WHERE id = 1').fetchone() if 'registry_identity' in tables else None
-        token = identity[0] if identity else None
-        closed = {row[0] for row in conn.execute('SELECT run_id FROM closed_runs')} if 'closed_runs' in tables else set()
-        for run in runs:
-            run['_verified_closed'] = run['id'] in closed
+        tasks, runs, token, members = read_project_status(conn, project['id'])
+        if members:
+            project['members'] = members
     with ThreadPoolExecutor(max_workers=8) as pool:
         inspected = list(pool.map(lambda run: inspect_run(run, token), runs))
     if not args.all:
-        latest = {run['task_id']: run['id'] for run in inspected}
-        active = {task['id'] for task in tasks if task['status'] not in ('done', 'cancelled')}
-        # Never suppress uncertainty, live terminals, or launch failures.
-        retained = [run for run in inspected if (run['task_id'] in active and run['id'] == latest[run['task_id']])
-                    or run['terminal_status']['state'] not in ('finished', 'closed')
-                    or run['launch_state'] != 'started']
+        retained = current_runs(tasks, inspected)
         relevant = {run['task_id'] for run in retained}
         visible_tasks = [task for task in tasks if task['status'] not in ('done', 'cancelled') or task['id'] in relevant]
         omitted = {'tasks': len(tasks) - len(visible_tasks), 'runs': len(inspected) - len(retained)}

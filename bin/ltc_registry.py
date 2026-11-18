@@ -26,7 +26,21 @@ def ensure_runs(conn):
         detail TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )''')
+    # NULL harness identifies runs written by the old Codex-only launcher.
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(cook_runs)')}
+    for column in ('harness', 'model', 'reasoning_effort'):
+        if column not in columns:
+            conn.execute(f'ALTER TABLE cook_runs ADD COLUMN {column} TEXT')
     conn.execute('CREATE INDEX IF NOT EXISTS cook_runs_task_id ON cook_runs(task_id, id)')
+
+
+def start_run(conn, task_id, project_id, space, worktree, base, hc_session, name, route):
+    cursor = conn.execute("""INSERT INTO cook_runs
+        (task_id, project_id, space, worktree, base, hc_session, name, profile, harness, model, reasoning_effort, launch_state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting')""",
+        (task_id, project_id, space, str(worktree), base, hc_session, name,
+         route.profile, route.harness, route.model, route.reasoning_effort))
+    return cursor.lastrowid
 
 
 def connect(path):

@@ -19,6 +19,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', default=os.environ.get('LTC_DB', str(ROOT / '.letthemcook' / 'registry.sqlite3')))
     parser.add_argument('--watch', action='store_true', help='Keep synchronizing open Spaces')
+    parser.add_argument('--use-codex-display-settings', action='store_true',
+                        help='Use your Codex transcript and folding settings for new Chefs')
     parser.add_argument('--interval', type=int, default=15, help='Watch interval in seconds (default: 15)')
     parser.add_argument('project', nargs='?', help='Only synchronize this project')
     args = parser.parse_args()
@@ -26,6 +28,8 @@ def main():
         parser.error('--interval must be positive')
     if args.watch:
         command = [sys.executable, str(Path(__file__).resolve()), '--db', args.db]
+        if args.use_codex_display_settings:
+            command.append('--use-codex-display-settings')
         if args.project:
             command.append(args.project)
         try:
@@ -63,9 +67,16 @@ def main():
                            + '\nHerdr Space ID: ' + space_id + '\nRegistry: ' + str(Path(args.db).expanduser().resolve())
                            + '\nLetThemCook directory: ' + str(ROOT)
                            + '\nYou are the Chef for this project only. Read the project instructions and await the user.')
-                # The command name is passed separately; the JSON object holds its arguments.
+                if project.get('members'):
+                    prompt += ('\n\n# Assigned workspace\nWorkspace root: ' + str(path)
+                               + '\nProject description: ' + project['description']
+                               + '\nRegistered member checkouts:\n'
+                               + '\n'.join(f"- {m['name']}: {m['path']}" for m in project['members']))
+                argv = ['codex', '--no-daemon', '--approve-for-me']
+                if not args.use_codex_display_settings:
+                    argv += ['-c', 'tui.fullscreen_transcript=true', '-c', 'tui.collapse_turn_details=true']
                 output = run(['herdr-app', 'do', 'tab.new', '--name', name, '--space', space_id,
-                              '--folder', str(path), '--argv', json.dumps(['codex', '--no-daemon', '--approve-for-me']), '--task', prompt, '--focus', 'false'])
+                              '--folder', str(path), '--argv', json.dumps(argv), '--task', prompt, '--focus', 'false'])
                 report.update(status='started', result=json.loads(output))
         except (ValueError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
             report.update(status='error', error=str(error), detail=getattr(error, 'stderr', None))

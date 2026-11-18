@@ -36,6 +36,7 @@ class ResumeTest(unittest.TestCase):
         self.info = {'address':'t-old', 'state':'finished', 'labels':{'ltc.registry':token,'ltc.run':'1','ltc.task':'1','ltc.project':'1','herdr.space':'sp1'}}
         self.info_path = self.root / 'terminal.json'
         self.write_info()
+        (self.root / 'codex').symlink_to('/usr/bin/false')
         hc = self.root / 'hc'
         hc.write_text('''#!/usr/bin/env python3
 import json, os, sys
@@ -76,6 +77,31 @@ else: print(json.dumps({'address':'t-new', 'first_message':{'sent':True}}))
         again = self.call()
         self.assertNotEqual(again.returncode, 0)
         self.assertIn('newer run', again.stderr)
+
+    def test_resumes_pre_routing_registry_before_any_migration(self):
+        # A historical run has a profile name, no routing columns, and its original labels.
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("""CREATE TABLE legacy (
+                id INTEGER PRIMARY KEY, task_id INTEGER, project_id INTEGER, space TEXT,
+                worktree TEXT, base TEXT, terminal TEXT, hc_session TEXT, name TEXT,
+                profile TEXT, launch_state TEXT, detail TEXT, created_at TEXT, updated_at TEXT)""")
+            conn.execute("""INSERT INTO legacy SELECT id, task_id, project_id, space, worktree,
+                base, terminal, hc_session, name, profile, launch_state, detail, created_at,
+                updated_at FROM cook_runs""")
+            conn.execute('DROP TABLE cook_runs')
+            conn.execute('ALTER TABLE legacy RENAME TO cook_runs')
+        config = {
+            'default_harness': 'pi', 'profiles': {'default': {'model': 'gpt-6.2-sol', 'reasoning_effort': 'low'}},
+            'prompts': {'cook': str(ROOT / 'prompts/cook.md')},
+        }
+        path = self.root / 'legacy-config.json'
+        path.write_text(json.dumps(config))
+        result = subprocess.run([str(ROOT / 'bin/ltc-resume'), '1', '--config', str(path)],
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with sqlite3.connect(self.db) as conn:
+            rows = conn.execute('SELECT id, harness, model, reasoning_effort FROM cook_runs ORDER BY id').fetchall()
+        self.assertEqual(rows, [(1, None, None, None), (2, 'codex', 'gpt-6.2-sol', 'low')])
 
     def test_refuses_live_mismatched_and_missing_terminal(self):
         for state, task in [('live', '1'), ('finished', 'wrong')]:

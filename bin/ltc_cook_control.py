@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from ltc_worktree import inspect
+from ltc_workspace import member_for_run, member_label_matches
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -47,6 +48,8 @@ def main():
     if row is None:
         raise ValueError('Run or registry identity not found')
     run = dict(row)
+    member = member_for_run(conn, run)
+    checkout = member['path'] if member else run['project_path']
     siblings = [dict(item) for item in conn.execute('SELECT * FROM cook_runs WHERE worktree = ? AND id != ?', (run['worktree'], run['id']))]
     address = run['terminal']
     if not address:
@@ -69,7 +72,8 @@ def main():
         identity = {'ltc.registry': run['token'], 'ltc.run': str(record['id']),
                     'ltc.task': str(record['task_id']), 'ltc.project': str(record['project_id']),
                     'herdr.space': record['space']}
-        if terminal.get('address') != record['terminal'] or any(labels.get(k) != v for k, v in identity.items()):
+        if (terminal.get('address') != record['terminal'] or not member_label_matches(record, labels)
+                or any(labels.get(k) != v for k, v in identity.items())):
             raise ValueError('Terminal identity does not match the recorded run; no action taken')
         if terminal.get('state') not in ('live', 'finished'):
             raise ValueError('Terminal state is unknown; no action taken')
@@ -81,7 +85,9 @@ def main():
             raise ValueError('Cook terminal is not live')
         subprocess.run(['hc', 'send', address, args.message], env=env, check=True)
     elif args.command == 'check':
-        report = inspect(run['project_path'], run['worktree'], run['base'])
+        report = inspect(checkout, run['worktree'], run['base'])
+        if member:
+            report['member'] = member['name']
         print(json.dumps(report, ensure_ascii=False))
     else:
         native_status = terminal.get('status')
@@ -92,7 +98,7 @@ def main():
                 continue
             if checked_terminal(sibling)['state'] != 'finished':
                 raise ValueError('Another Cook for this worktree is still live; no action taken')
-        report = inspect(run['project_path'], run['worktree'], run['base'])
+        report = inspect(checkout, run['worktree'], run['base'])
         if not report['safe_to_remove'] and not args.discard_changes:
             print(json.dumps({'error': 'work_not_confirmed_on_main', 'report': report}, ensure_ascii=False), file=sys.stderr)
             return 1
@@ -101,7 +107,7 @@ def main():
             terminal = checked_terminal(run)
             if terminal['state'] != 'finished':
                 raise ValueError('Cook terminal did not finish; worktree was not removed')
-        report = inspect(run['project_path'], run['worktree'], run['base'])
+        report = inspect(checkout, run['worktree'], run['base'])
         if not report['safe_to_remove'] and not args.discard_changes:
             print(json.dumps({'error': 'work_changed_during_close', 'report': report}, ensure_ascii=False), file=sys.stderr)
             return 1

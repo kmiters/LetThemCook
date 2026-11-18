@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
 """Launch a registered task using the current Chef terminal."""
+import argparse
 import os
 from pathlib import Path
 import sqlite3
 import sys
 
+from ltc_harness import EFFORTS
+from ltc_workspace import member_for_task
 from ltc_registry import format_task, get_brief
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def main():
-    if not 2 <= len(sys.argv[1:]) <= 4 or sys.argv[1] == '--help':
-        raise ValueError('Usage: ltc-cook PROJECT TASK_ID [WORKTREE_NAME] [PROFILE]')
-    project, task_id = sys.argv[1:3]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('project')
+    parser.add_argument('task_id')
+    parser.add_argument('worktree_name', nargs='?')
+    parser.add_argument('legacy_profile', nargs='?', metavar='profile')
+    parser.add_argument('--profile', help='Cook complexity profile')
+    parser.add_argument('--harness', choices=EFFORTS, help='Cook CLI')
+    parser.add_argument('--config', help='JSON configuration')
+    args = parser.parse_args()
+    if args.profile and args.legacy_profile:
+        parser.error('Supply the profile once, positionally or with --profile')
+    project, task_id = args.project, args.task_id
     if not task_id.isascii() or not task_id.isdecimal() or int(task_id) <= 0:
         raise ValueError('TASK_ID must be a positive integer')
     chef = os.environ.get('HC_TERMINAL_ID')
@@ -24,7 +36,7 @@ def main():
         raise ValueError('Registry not found')
     with sqlite3.connect(db.as_uri() + '?mode=ro', uri=True) as conn:
         conn.row_factory = sqlite3.Row
-        row = conn.execute('''SELECT tasks.id, tasks.title, tasks.description, projects.name AS project,
+        row = conn.execute('''SELECT tasks.id, tasks.project_id, tasks.title, tasks.description, projects.name AS project,
                               projects.path, projects.space FROM tasks JOIN projects ON projects.id = tasks.project_id
                               WHERE tasks.id = ?''', (int(task_id),)).fetchone()
         if row is None:
@@ -34,12 +46,19 @@ def main():
             raise ValueError(f'Task {task_id} belongs to another project: {task["project"]}')
         if not task['space']:
             raise ValueError(f'Project {project} has no assigned Herdr Space.')
+        member = member_for_task(conn, task['project_id'], int(task_id))
+        if member:
+            task['path'] = member['path']
         task['brief'] = get_brief(conn, int(task_id))
-    name = sys.argv[3] if len(sys.argv) > 3 else 'task-' + task_id
-    profile = sys.argv[4] if len(sys.argv) > 4 else 'default'
+    name = args.worktree_name or 'task-' + task_id
     launcher = str(ROOT / 'bin' / 'ltc')
-    os.execv(launcher, [launcher, '--project', task['path'], '--space', task['space'], '--name', name,
-                       '--profile', profile, '--task', format_task(task), '--chef', chef, '--task-id', task_id])
+    command = [launcher, '--project', task['path'], '--space', task['space'], '--name', name,
+               '--task', format_task(task), '--chef', chef, '--task-id', task_id]
+    for key, value in (('--profile', args.profile or args.legacy_profile), ('--harness', args.harness),
+                       ('--config', args.config)):
+        if value is not None:
+            command.extend([key, value])
+    os.execv(launcher, command)
 
 
 if __name__ == '__main__':
