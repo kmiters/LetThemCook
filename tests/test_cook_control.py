@@ -95,6 +95,23 @@ elif sys.argv[1] == 'rm':
         self.assertEqual([c['args'][0] for c in self.commands()], ['get', 'kill', 'get', 'get', 'rm'])
 
 
+    def test_reused_path_excludes_closed_lifecycle(self):
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE tasks SET status='done'")
+            conn.execute("CREATE TABLE closed_runs (run_id INTEGER PRIMARY KEY)")
+            conn.execute("INSERT INTO closed_runs VALUES (1)")
+            conn.execute("""INSERT INTO cook_runs (task_id,project_id,space,worktree,base,terminal,
+                hc_session,name,profile,launch_state) SELECT task_id,project_id,space,worktree,base,
+                't2',hc_session,name,profile,launch_state FROM cook_runs WHERE id=1""")
+        self.state.write_text(json.dumps({'address': 't2', 'state': 'finished',
+                                         'labels': dict(self.labels, **{'ltc.run': '2'})}))
+        self.assertNotEqual(self.call('close', '1').returncode, 0)
+        self.assertTrue(self.worktree.is_dir())
+        result = self.call('close', '2')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.worktree.exists())
+        self.assertTrue(all(c['args'][1] == 't2' for c in self.commands()))
+
     def test_landed_change_can_be_closed(self):
         (self.worktree / 'file').write_text('landed')
         subprocess.run(['git', '-C', str(self.worktree), 'add', 'file'], check=True)

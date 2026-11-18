@@ -50,7 +50,20 @@ def main():
     run = dict(row)
     member = member_for_run(conn, run)
     checkout = member['path'] if member else run['project_path']
-    siblings = [dict(item) for item in conn.execute('SELECT * FROM cook_runs WHERE worktree = ? AND id != ?', (run['worktree'], run['id']))]
+    if args.command == 'close':
+        # A verified removal ends the lifetime of this worktree, including its
+        # resumed runs. Old receipts only identify the selected run.
+        columns = {r[1] for r in conn.execute('PRAGMA table_info(closed_runs)')}
+        if 'last_run_id' not in columns:
+            conn.execute('ALTER TABLE closed_runs ADD COLUMN last_run_id INTEGER')
+        boundary = conn.execute('''SELECT COALESCE(MAX(COALESCE(c.last_run_id, c.run_id)), 0)
+            FROM closed_runs c JOIN cook_runs r ON r.id=c.run_id WHERE r.worktree=?''',
+            (run['worktree'],)).fetchone()[0]
+        if run['id'] <= boundary:
+            raise ValueError('This worktree lifecycle has already been closed')
+        siblings = [dict(item) for item in conn.execute(
+            'SELECT * FROM cook_runs WHERE worktree=? AND id>? AND id!=?',
+            (run['worktree'], boundary, run['id']))]
     address = run['terminal']
     if not address:
         raise ValueError('Run has no recorded terminal; inspect the launch before acting')
@@ -125,7 +138,8 @@ def main():
         if terminal['state'] != 'finished':
             raise ValueError('Terminal state changed; it was not removed')
         subprocess.run(['hc', 'rm', address], env=env, check=True)
-        conn.execute('INSERT INTO closed_runs (run_id) VALUES (?)', (run['id'],))
+        last_run = max([run['id'], *(item['id'] for item in siblings)])
+        conn.execute('INSERT INTO closed_runs (run_id,last_run_id) VALUES (?,?)', (run['id'], last_run))
         conn.commit()
         print(json.dumps({'closed': run['id'], 'removed_worktree': report['worktree'], 'discarded_changes': bool(args.discard_changes and not report['safe_to_remove'])}))
     conn.close()
