@@ -154,6 +154,8 @@ else:
         self.config.update(default_harness='claude', default_profile='routine')
         self.launch()
         self.assert_command(['claude', '--model', 'sonnet', '--effort', 'medium'])
+        self.launch('polish', '--harness', 'claude', '--profile', 'simple')
+        self.assert_command(['claude', '--model', 'haiku', '--effort', 'low'])
         self.launch('other', '--harness', 'pi', '--profile', 'simple')
         self.assert_command(['pi', '--model', 'openai-codex/gpt-6-luna', '--thinking', 'high'])
 

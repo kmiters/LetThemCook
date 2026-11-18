@@ -10,11 +10,11 @@
       "claude": {}
     },
     "simple": {
-      "description": "A bounded, repeatable edit with an obvious check.",
+      "description": "A bounded, directly checkable edit such as UI polish, copy, spacing, or a repeatable mechanical change.",
       "model": "gpt-6-luna",
       "reasoning_effort": "high",
       "pi": {"model": "openai-codex/gpt-6-luna", "reasoning_effort": "high"},
-      "claude": {"model": "haiku"}
+      "claude": {"model": "haiku", "reasoning_effort": "low"}
     },
     "routine": {
       "description": "Ordinary feature implementation or a localized bug fix with tests.",
