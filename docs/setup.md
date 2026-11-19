@@ -57,3 +57,20 @@ The launcher recognizes the current and legacy Chef tab names. A same-named tab 
 ## Where your orders are stored
 
 The default registry is `.letthemcook/registry.sqlite3` under the LetThemCook checkout. It is created on first use by the registry CLI and ignored by Git. Keep a SQLite backup if you need to preserve project registrations, tasks, runs, and reports. Set `LTC_DB` for a different registry and keep using that same path across commands and sessions. [Registry commands](operations.md#registry-and-run-history)
+
+## Daily LetThemCook update check
+
+Chef lifecycle hooks in Codex and Claude Code check the GitHub `main` ref for this LetThemCook installation. The check supports a single HTTPS `origin` for `github.com/kmiters/LetThemCook` (with or without `.git`) and uses your existing Git credentials without prompting. It reads the remote commit ID without fetching objects, updating Git refs, changing the checkout, or deploying anything.
+
+The automatic check is eligible on a trusted Chef hook at session startup or resume, or after a Bash tool call in an already registered Chef session, when the hook runs in the Chef's registered checkout. All Chefs launched from the same LetThemCook checkout share `.letthemcook/update-check.sqlite3`, including Chefs using different registries. The check records the attempt before contacting GitHub. The next network attempt is eligible 24 hours after that UTC timestamp, including after a failed attempt. The first eligible hook performs it. If the check is interrupted after recording an attempt, that attempt still counts toward the limit. Without a trusted hook, a running Chef, or a matching event, no automatic check takes place.
+
+From the LetThemCook checkout, inspect the state or explicitly request a check under the same limit.
+
+```sh
+bin/ltc-update
+bin/ltc-update --check
+```
+
+The status includes the last attempt and last success in UTC, when another attempt becomes eligible, and the local and remote commit IDs from the last successful check. The recorded relation is `up_to_date`, `ahead`, `behind`, `diverged`, or `unknown`. Missing local history can make the relation uncertain even when the remote commit ID is known. Network or credential failures appear as `request_failed` or `timeout`. The `origin` field shows whether the current configuration is supported.
+
+An automatic check can add one short note to the Chef's hook context when it first observes a differing remote tip or observes a change from the last successful check. Equal tips, local `main` already containing the remote tip, routine checks, and failures stay quiet. An uncertain relation is reported as such.
