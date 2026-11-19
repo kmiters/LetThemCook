@@ -4,15 +4,22 @@ import os
 import subprocess
 
 
-def verified_chef(conn, project_id, *, address=None, session=None):
+def chef_binding(conn, project_id):
     bound = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='watch_targets'").fetchone()
     target = bound and conn.execute('''SELECT w.chef, w.session, p.space, r.token
         FROM watch_targets w JOIN projects p ON p.id=w.project_id AND p.space=w.space
         JOIN registry_identity r ON r.id=1 WHERE p.id=?''', (project_id,)).fetchone()
     if not target:
         raise ValueError('No Chef bound in the current Space. Run ltc-watch start from the project Chef.')
-    chef, bound_session, space, token = target
-    if (address is not None and chef != address) or (session is not None and session != bound_session):
+    return tuple(target)
+
+
+def verify_callback(conn, project_id, address):
+    if os.environ.get('HC_SOCKET'):
+        raise ValueError('Cannot verify a Chef callback with an HC_SOCKET override')
+    binding = chef_binding(conn, project_id)
+    chef, bound_session, space, token = binding
+    if chef != address or bound_session != (os.environ.get('HC_SESSION') or 'default'):
         raise ValueError('Chef address or Herdr session does not match the project binding')
     env = dict(os.environ, HC_SESSION=bound_session)
     env.pop('HC_SOCKET', None)
@@ -23,10 +30,4 @@ def verified_chef(conn, project_id, *, address=None, session=None):
     if (not isinstance(labels, dict) or data.get('address') != chef or data.get('state') != 'live'
             or any(labels.get(k) != v for k, v in expected.items())):
         raise ValueError('Live Chef identity does not match the registered endpoint')
-    return bound_session, chef
-
-
-def verify_callback(conn, project_id, address):
-    if os.environ.get('HC_SOCKET'):
-        raise ValueError('Cannot verify a Chef callback with an HC_SOCKET override')
-    verified_chef(conn, project_id, address=address, session=os.environ.get('HC_SESSION') or 'default')
+    return binding

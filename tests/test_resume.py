@@ -64,6 +64,10 @@ else: print(json.dumps({'address':'t-new', 'first_message':{'sent':True}}))
         self.assertEqual((self.worktree / 'file').read_text(), 'unfinished work')
         calls = [json.loads(line) for line in (self.root / 'log').read_text().splitlines()]
         self.assertEqual([c[0] for c in calls], ['get', 'run'])
+        options = calls[1][:calls[1].index('--')]
+        self.assertIn('--no-notify', options)
+        self.assertEqual(options[options.index('--parent') + 1], 't-chef')
+        self.assertNotIn('hc send t-chef', calls[1][-1])
         codex_args = calls[1][calls[1].index('--') + 1:-1]
         self.assertIn('--approve-for-me', codex_args)
         self.assertNotIn('--ask-for-approval', codex_args)

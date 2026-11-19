@@ -14,7 +14,7 @@ from pathlib import Path
 from ltc_endpoint import verify_callback
 from ltc_harness import EFFORTS, resolve_route
 from ltc_workspace import check_member_worktree, checked_member_path, member_for_task, member_prompt
-from ltc_registry import connect, ensure_runs, start_run, terminal_name
+from ltc_registry import connect, cook_reporting_context, ensure_runs, start_run, terminal_name
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -32,7 +32,7 @@ def main():
     parser.add_argument('--profile', help='Configured Cook model profile')
     parser.add_argument('--task', required=True, help='Self-contained task brief')
     parser.add_argument('--base', default='HEAD', help='Committed base (default: HEAD)')
-    parser.add_argument('--chef', help='Chef terminal address for Cook reports (defaults to HC_TERMINAL_ID)')
+    parser.add_argument('--chef', help='Parent Chef terminal address (defaults to HC_TERMINAL_ID)')
     parser.add_argument('--task-id', type=int, help='Registry task ID for recording this launch')
     parser.add_argument('--db', default=os.environ.get('LTC_DB', str(ROOT / '.letthemcook' / 'registry.sqlite3')), help='Registry database')
     parser.add_argument('--config', default=str(ROOT / 'config.json'), help='JSON configuration')
@@ -75,14 +75,12 @@ def main():
         if member:
             check_member_worktree(checkout, target)
             prompt += member_prompt(member, row[1])
-        prompt += '\nRegistry: ' + str(db_path) + '\nLetThemCook directory: ' + str(ROOT)
+        prompt += cook_reporting_context(db_path, ROOT)
         args.chef = args.chef or os.environ.get('HC_TERMINAL_ID')
         if args.chef:
             verify_callback(conn, row[0], args.chef)
     elif args.chef:
         raise ValueError('A Chef callback requires a registered --task-id')
-    if args.chef:
-        prompt += '\nSave results with ltc-report. Send questions to the Chef using hc send ' + args.chef + '. This is the verified return address supplied by the launcher.'
     session_id = str(uuid4()) if conn is not None and route.harness == 'claude' else None
     harness_cmd = route.command(prompt, claude_session_id=session_id)
     if conn is not None:
@@ -116,7 +114,7 @@ def main():
         raise
 
     display_name = terminal_name(row[3]) if conn is not None else args.name
-    cmd = ['hc', 'run', '--bg', '--name', display_name, '--cwd', str(target), '--label', 'herdr.space=' + args.space]
+    cmd = ['hc', 'run', '--bg', '--no-notify', '--name', display_name, '--cwd', str(target), '--label', 'herdr.space=' + args.space]
     if conn is not None:
         token = conn.execute('SELECT token FROM registry_identity WHERE id = 1').fetchone()[0]
         cmd += ['--label', 'ltc.registry=' + token, '--label', 'ltc.run=' + str(run_id),

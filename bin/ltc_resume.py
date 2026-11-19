@@ -11,7 +11,7 @@ from ltc_claude_session import confirm_transcript
 from ltc_endpoint import verify_callback
 from ltc_harness import CookRoute, resolve_route
 from ltc_workspace import member_for_run, member_label_matches, member_prompt
-from ltc_registry import ensure_runs, format_task, get_brief, start_run, terminal_name
+from ltc_registry import cook_reporting_context, ensure_runs, format_task, get_brief, start_run, terminal_name
 import sqlite3
 import subprocess
 import sys
@@ -112,8 +112,8 @@ def main():
                'This is a fresh session continuing the same task in the existing worktree.')
     prompt = (prompt_base + '\n\n# Resumed task\n' + task_brief
               + '\n\n' + context + ' Inspect existing changes and prior context before editing; preserve the work. Do not assume the task is complete.'
-              + '\nPrevious run ID: ' + str(run['id']) + '\nYour worktree: ' + str(worktree) + '\nRegistry: ' + str(db)
-              + '\nLetThemCook directory: ' + str(ROOT) + '\nSave results with ltc-report. Send questions to the Chef using hc send ' + chef + '.')
+              + '\nPrevious run ID: ' + str(run['id']) + '\nYour worktree: ' + str(worktree)
+              + cook_reporting_context(db, ROOT))
     if member:
         prompt += member_prompt(member, run['project_path'])
     harness_cmd = route.command(prompt, claude_session_id=session_id, resume=native)
@@ -128,7 +128,7 @@ def main():
         conn.execute('UPDATE cook_runs SET launch_state = ?, terminal = ?, detail = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (state, terminal, detail, new_id))
         conn.commit()
 
-    cmd = ['hc', 'run', '--bg', '--name', name, '--cwd', str(worktree), '--parent', chef,
+    cmd = ['hc', 'run', '--bg', '--no-notify', '--name', name, '--cwd', str(worktree), '--parent', chef,
            '--label', 'herdr.space=' + run['space'], '--label', 'ltc.registry=' + run['token'],
            '--label', 'ltc.run=' + str(new_id), '--label', 'ltc.task=' + str(run['task_id']),
            '--label', 'ltc.project=' + str(run['project_id'])]

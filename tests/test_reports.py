@@ -37,15 +37,11 @@ class ReportTest(unittest.TestCase):
                 VALUES (1,1,'s','/fixture','base','cook','fixture','test','default','started')""")
         hc = self.root / 'hc'
         hc.write_text("""#!/usr/bin/env python3
-import os, sqlite3, sys
+import os, sys
 from pathlib import Path
 root = Path(os.environ['REPORT_TEST'])
-if sys.argv[1] == 'send':
-    with sqlite3.connect(os.environ['LTC_DB'], timeout=.1) as conn:
-        conn.execute('BEGIN IMMEDIATE')
-        assert conn.execute('SELECT count(*) FROM cook_reports').fetchone()[0] == 1
-    with (root/'sends').open('a') as log: print(sys.argv[2], file=log)
-    sys.exit(1 if (root/'fail').exists() else 0)
+with (root/'calls').open('a') as log: print(sys.argv[1], file=log)
+assert sys.argv[1] == 'get'
 print(os.environ['TEST_COOK' if sys.argv[2]=='cook' else 'TEST_CHEF'])
 """)
         hc.chmod(0o755)
@@ -54,11 +50,11 @@ print(os.environ['TEST_COOK' if sys.argv[2]=='cook' else 'TEST_CHEF'])
         return subprocess.run([BIN/'ltc-report', '--outcome', outcome, '--validation', '2 checks passed',
                                '--review-url', url, *flags], env=self.env, text=True, capture_output=True)
 
-    def test_save_before_notify_retry_and_render(self):
-        (self.root/'fail').touch()
+    def test_quiet_save_legacy_retry_and_render(self):
         args = ('<result>', 'http://localhost:8080', '--notify')
         first = self.report(*args)
-        self.assertNotEqual(first.returncode, 0)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertFalse(json.loads(first.stdout)['notified'])
         self.assertTrue(json.loads(first.stdout)['saved'])
         with closing(connect(self.db)) as conn:
             board, revision = lookup(conn, '/projects/1')[1]
@@ -69,18 +65,50 @@ print(os.environ['TEST_COOK' if sys.argv[2]=='cook' else 'TEST_CHEF'])
             self.assertIn('href="http://localhost:8080"', detail)
             self.assertEqual(lookup(conn, '/projects/2/tasks/1')[0], 404)
             self.assertEqual(conn.execute('SELECT status FROM tasks').fetchone()[0], 'todo')
-        (self.root/'fail').unlink()
         for _ in range(2):
             retry = self.report(*args)
             self.assertEqual(retry.returncode, 0, retry.stderr)
             self.assertEqual(json.loads(retry.stdout)['report_id'], 1)
-        self.assertEqual((self.root/'sends').read_text().splitlines(), ['chef', 'chef'])
         self.assertEqual(self.report('Follow-up').returncode, 0)
         with closing(connect(self.db)) as conn:
             board, new_revision = lookup(conn, '/projects/1')[1]
             self.assertNotEqual(new_revision, revision)
             self.assertIn('Follow-up', board)
             self.assertEqual(conn.execute('SELECT count(*) FROM cook_reports').fetchone()[0], 2)
+
+    def test_chef_receives_question_while_cook_is_live_once(self):
+        question = 'Decision needed: Which account should own the preview?'
+        saved = self.report(question)
+        self.assertEqual(saved.returncode, 0, saved.stderr)
+        chef_env = dict(self.env, HC_TERMINAL_ID='chef')
+        def inbox():
+            return json.loads(subprocess.check_output([BIN/'ltc-watch', 'inbox', 'app'], env=chef_env))
+        self.assertEqual(inbox(), {'events': [], 'reports': [{'id': 1, 'run_id': 1, 'task_id': 1}]})
+        result = json.loads(subprocess.check_output([BIN/'ltc-db', 'task', 'show', '1'], env=chef_env))
+        self.assertEqual(result['reports'][0]['outcome'], question)
+        self.assertEqual(self.report(question).returncode, 0)
+        self.assertEqual(inbox()['reports'], [])
+        self.assertEqual(set((self.root/'calls').read_text().splitlines()), {'get'})
+
+    def test_inbox_acknowledges_only_reports_for_the_bound_project(self):
+        self.assertEqual(self.report('First project').returncode, 0)
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("INSERT INTO projects (name,path,space) VALUES ('other','/other','s2')")
+            conn.execute("INSERT INTO tasks (project_id,title) VALUES (2,'Other task')")
+            conn.execute("""INSERT INTO cook_runs (project_id,task_id,space,worktree,base,terminal,hc_session,name,profile,launch_state)
+                VALUES (2,2,'s2','/other','base','other-cook','fixture','test','default','started')""")
+            conn.execute("""INSERT INTO cook_reports (run_id,outcome,validation,review_url)
+                VALUES (2,'Private question','Pending','')""")
+        chef_env = dict(self.env, HC_TERMINAL_ID='chef')
+        cli = [BIN/'ltc-watch', 'inbox']
+        reports = json.loads(subprocess.check_output(cli + ['app'], env=chef_env))['reports']
+        self.assertEqual(reports, [{'id': 1, 'run_id': 1, 'task_id': 1}])
+        other_chef = dict(self.env, HC_TERMINAL_ID='chef-2')
+        bind_chef(other_chef, 's2')
+        self.assertNotEqual(subprocess.run(cli + ['other'], env=chef_env, capture_output=True).returncode, 0)
+        reports = json.loads(subprocess.check_output(cli + ['other'], env=other_chef))['reports']
+        self.assertEqual(reports, [{'id': 2, 'run_id': 2, 'task_id': 2}])
+        self.assertEqual(json.loads(subprocess.check_output(cli + ['other'], env=other_chef))['reports'], [])
 
     def test_invalid_fields_or_identity_never_save(self):
         self.assertNotEqual(self.report('x'*4001).returncode, 0)

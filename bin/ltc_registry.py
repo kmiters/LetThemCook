@@ -101,6 +101,11 @@ def get_brief(conn, task_id):
     return dict(zip(BRIEF_FIELDS, row)) if row else None
 
 
+def cook_reporting_context(db, root):
+    return (f'\nRegistry: {db}\nLetThemCook directory: {root}'
+            '\nSave results, questions and blockers with ltc-report. The Chef reads the project inbox.')
+
+
 def format_task(task):
     sections = [f"Task #{task['id']}: {task['title']}"]
     seen = {}

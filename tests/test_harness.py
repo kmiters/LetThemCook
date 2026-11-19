@@ -101,7 +101,8 @@ else:
             expected = expected + [flag, argv[-3]]
         self.assertEqual(argv[:-1], expected + ['--'])
         self.assertIn(self.brief, argv[-1])
-        self.assertIn('hc send chef', argv[-1])
+        self.assertIn('ltc-report', argv[-1])
+        self.assertNotIn('hc send chef', argv[-1])
         if expected[0] == 'pi':
             self.assertTrue(argv[-1].startswith('\n@file'))
         self.assertFalse(list(self.project.rglob('injected')))

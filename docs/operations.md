@@ -65,28 +65,39 @@ Control commands verify terminal identity in the recorded session against the re
 
 ## Durable Cook reports
 
-From the verified live Cook terminal, save the result before notifying the Chef. Use the assigned database path and replace the example URL with the verified preview or task ticket. Omit `--review-url` when unavailable.
+From the verified live Cook terminal, save the result for the Chef. Use the assigned database path and replace the example URL with the verified preview or task ticket. Omit `--review-url` when unavailable.
 
 ```sh
 bin/ltc-report --db /absolute/path/to/registry.sqlite3 \
   --outcome 'Fixed the settings save button in the assigned worktree' \
   --validation 'Verified persistence after reload. Cross-browser checks were skipped.' \
-  --review-url http://127.0.0.1:8080 --notify
+  --review-url http://127.0.0.1:8080
 ```
 
 Include the worktree, changed files, actual checks and omissions, blockers, and preview lifetime as applicable. Outcome and validation each support up to 4,000 characters. The optional URL must be absolute HTTP(S) and at most 2,048 characters. Each run can save up to 20 distinct reports.
 
-If notification fails after saving, retry the identical report from the Cook terminal. It reuses the report ID and retries delivery when needed. A lost acknowledgement or concurrent notifications can produce duplicates. The board card shows the latest outcome. The ticket detail and `ltc-db task show` include up to 20 recent reports. The Chef still needs explicit user acceptance before final integration.
+For a question or blocker, save a report as soon as you need help. Start the outcome with “Decision needed” or “Blocked” and state what you need to continue. The Chef can read it while the Cook is still working and reply with `ltc-cook-control send RUN_ID MESSAGE`. Saving an identical report again returns its original ID. The legacy `--notify` flag is accepted and leaves the report available for pickup without sending a terminal message.
 
-Use the verified Chef return address with `hc send ADDRESS MESSAGE` for questions. A report can target the currently bound Chef through `--notify`.
+The board card shows the latest outcome. The ticket and `ltc-db task show` include up to 20 recent reports. Only explicit user acceptance authorizes final integration.
 
 ## Cook watcher
 
-At startup the Chef runs `bin/ltc-watch start my-app` and reads `bin/ltc-status my-app`. The watcher launch binds the live Chef terminal and starts or reuses a separate process in Herdr. Use the assigned registry and session with no `HC_SOCKET` override. A new Chef can register itself as the destination.
+At startup the Chef runs `bin/ltc-watch start my-app` in the project Space, then reads `bin/ltc-status my-app` and the project inbox. Use the assigned registry for each command and the recorded Herdr session without an `HC_SOCKET` override. One watcher holds the project and registry lock. The watcher binds the live Chef, polls up to eight Cook terminals concurrently every 15 seconds and records changes in SQLite. It records launch problems and observed done, blocked, error, finished and unknown states. Short transitions between checks can be missed. Reports are saved independently of the watcher.
 
-The watcher polls every 15 seconds by default, without calling a model. It checks up to eight Cook terminals concurrently and records events for observed done, blocked, error, finished or unknown states and launch problems. A Cook's saved report and its notification come from `ltc-report`. A separate watcher event can prompt the Chef to inspect the same result.
+From the bound Chef terminal, use the following cycle during active supervision. Read the inbox immediately after dispatch, resume or follow-up. Wait while work is pending, then check again on every return, including timeouts.
 
-Watchers suppress repeated observations of unchanged states and retry pending events in batches of up to 20 after verifying the Chef destination. Delivery can repeat after a lost acknowledgement. Short transitions between checks can be missed. One active watcher holds the project and registry lock. If the watcher dies, inspect its terminal. The Chef tab sync loop does not restart it. When the normal watcher is stopped, use `bin/ltc-watch run my-app --once` to observe and deliver one cycle for diagnosis.
+```sh
+bin/ltc-watch inbox my-app
+hc wait --children any --timeout 30
+bin/ltc-watch inbox my-app
+bin/ltc-db task show 12
+```
+
+The wait returns child activity as command output. For a surviving Cook parented to an earlier Chef, check its run identity with `ltc-status` and wait on that terminal in its recorded session using `hc wait ADDRESS --timeout 30`. The inbox returns up to 20 unread report references and 20 recorded transitions per read. Read again if either batch is full. Open the indicated task and match its run and report IDs. The current Chef claims each entry once, including across restarts or simultaneous reads. Pickup covers open tasks in the current Space and the latest attempt per worktree. Use `bin/ltc-watch inbox my-app --recent` to inspect the latest 20 entries of each kind across the project history without acknowledging them. Run `ltc-status` to confirm current state before acting on a transition.
+
+An idle Chef receives updates on its next check. On returning, inspect active tickets for unresolved questions, including those already read. Review the diff and checks, answer the Cook directly where possible, and relay decisions, consequential blockers and reviewed results to the user in plain language.
+
+Launch and resume pass `hc run --no-notify` while preserving the parent used by `hc wait`. Existing Cook terminals retain their launch settings and earlier prompts. A watcher already running older code retains its delivery loop, and `ltc-watch start` reuses that process. To switch a live project, its operator can identify its watcher using the registry and project labels and its command line. Stop that watcher alone, then run `ltc-watch start PROJECT` from the bound Chef and give existing agents the new supervision and reporting instructions. Stock notes from an existing Cook can continue until its next launch. The Chef tab sync loop does not restart watchers. When the watcher is stopped, `bin/ltc-watch run my-app --once` records a single observation cycle.
 
 ## Board service
 

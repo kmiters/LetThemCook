@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -31,13 +32,17 @@ class WatchTest(unittest.TestCase):
         (self.root / 'cook').write_text(json.dumps(cook))
         hc = self.root / 'hc'
         hc.write_text('''#!/usr/bin/env python3
-import json, os, sys
+import json, os, sqlite3, sys
 from pathlib import Path
 root=Path(os.environ['FAKE_DIR']); args=sys.argv[1:]
 if os.environ.get('HC_SESSION') != 'core' or os.environ.get('HC_SOCKET'): sys.exit(2)
 with (root/'log').open('a') as f: f.write(json.dumps(args)+'\\n')
 if args[0]=='get':
-    if args[1]=='t-chef': print((root/'chef').read_text())
+    if args[1]=='t-chef':
+        if (root/'rebind').exists():
+            with sqlite3.connect(os.environ['LTC_DB'], timeout=.1) as conn:
+                conn.execute("UPDATE watch_targets SET chef='replacement'")
+        print((root/'chef').read_text())
     elif args[1]=='t-cook': print((root/'cook').read_text())
     else: sys.exit(3)
 elif args[0]=='label':
@@ -46,8 +51,7 @@ elif args[0]=='label':
         key, value=x.split('=', 1); data['labels'][key]=value
     p.write_text(json.dumps(data))
 elif args[0]=='run': print(json.dumps({'address':'t-watch'}))
-elif args[0]=='send':
-    if (root/'fail-send').exists(): sys.exit(9)
+else: sys.exit(9)
 ''')
         hc.chmod(0o755)
 
@@ -67,29 +71,32 @@ elif args[0]=='send':
         obj['status']['state'] = state
         p.write_text(json.dumps(obj))
 
-    def test_retries_undelivered_events_and_deduplicates(self):
-        start = self.command('start', 'app')
-        self.assertEqual(start.returncode, 0, start.stderr)
-        self.assertEqual(json.loads(start.stdout)['status'], 'started')
+    def inbox(self, *flags):
+        response = self.command('inbox', 'app', *flags)
+        self.assertEqual(response.returncode, 0, response.stderr)
+        return json.loads(response.stdout)['events']
+
+    def test_pull_observed_transitions_once_and_recover_history(self):
+        self.assertEqual(self.command('start', 'app').returncode, 0)
         self.scan()
-        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.inbox(), [])
         self.update_cook('blocked')
-        (self.root / 'fail-send').touch()
-        self.scan()
-        with sqlite3.connect(self.db) as conn:
-            self.assertEqual(conn.execute('SELECT state,delivered FROM watch_events').fetchall(), [('agent_blocked', 0)])
-        (self.root / 'fail-send').unlink()
         self.scan()
         self.scan()
-        self.assertEqual(len(self.sends()), 2)  # failed attempt, then successful retry
+        event = {'id': 1, 'run_id': 1, 'task_id': 1, 'state': 'agent_blocked'}
+        self.assertEqual(self.inbox('--recent'), [event])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reads = list(pool.map(lambda _: self.inbox(), range(2)))
+        self.assertCountEqual(reads, [[event], []])
         self.update_cook('working')
         self.scan()
         self.update_cook('blocked')
         self.scan()
-        self.assertEqual(len(self.sends()), 3)
-        self.assertTrue(all('does not confirm task completion' in c[-1] for c in self.sends()))
+        self.assertEqual(self.inbox(), [dict(event, id=2)])
+        self.assertEqual(self.inbox('--recent'), [dict(event, id=2), event])
+        self.assertEqual(self.sends(), [])
 
-    def test_stale_start_is_unknown_and_notified_once(self):
+    def test_stale_start_is_unknown_and_recorded_once(self):
         self.assertEqual(self.command('start', 'app').returncode, 0)
         with sqlite3.connect(self.db) as conn:
             conn.execute("UPDATE cook_runs SET launch_state='starting', terminal=NULL")
@@ -99,14 +106,14 @@ elif args[0]=='send':
             conn.execute("UPDATE cook_runs SET created_at=datetime('now','-6 minutes')")
         self.scan()
         self.scan()
-        self.assertEqual(len(self.sends()), 1)
-        self.assertIn('stale_start_without_terminal', self.sends()[0][-1])
+        self.assertEqual([e['state'] for e in self.inbox()], ['stale_start_without_terminal'])
+        self.assertEqual(self.sends(), [])
         status = subprocess.check_output([ROOT / 'bin/ltc-status', 'app'], env=self.env)
         run = json.loads(status)['runs'][0]
         self.assertEqual(run['launch_state'], 'starting')
         self.assertEqual(run['terminal_status'], {'state': 'unknown', 'reason': 'stale_start_without_terminal'})
 
-    def test_relocation_waits_for_chef_in_new_space(self):
+    def test_relocation_retains_old_space_events_only_in_history(self):
         self.assertEqual(self.command('start', 'app').returncode, 0)
         with sqlite3.connect(self.db) as conn:
             conn.execute("UPDATE projects SET space='new' WHERE id=1")
@@ -115,12 +122,14 @@ elif args[0]=='send':
         self.assertEqual(self.sends(), [])
         with sqlite3.connect(self.db) as conn:
             self.assertEqual(conn.execute('SELECT delivered FROM watch_events').fetchall(), [(0,)])
+        self.assertNotEqual(self.command('inbox', 'app').returncode, 0)
         (self.root / 'chef').write_text(json.dumps({
             'address': 't-chef', 'state': 'live', 'labels': {'herdr.space': 'new'}}))
         self.assertEqual(self.command('start', 'app').returncode, 0)
         self.scan()
         self.scan()
-        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual(self.inbox(), [])
+        self.assertEqual([e['state'] for e in self.inbox('--recent')], ['agent_blocked'])
 
     def test_refuses_wrong_chef_identity(self):
         self.assertEqual(self.command('start', 'app').returncode, 0)
@@ -130,6 +139,7 @@ elif args[0]=='send':
         p.write_text(json.dumps(data))
         self.update_cook('done')
         self.scan()
+        self.assertNotEqual(self.command('inbox', 'app').returncode, 0)
         self.assertEqual(self.sends(), [])
         with sqlite3.connect(self.db) as conn:
             self.assertEqual(conn.execute('SELECT delivered FROM watch_events').fetchone()[0], 0)
@@ -145,32 +155,34 @@ elif args[0]=='send':
             events = conn.execute('SELECT state FROM watch_events ORDER BY id').fetchall()
         self.assertEqual(events, [('launch_delivery_failed',), ('agent_done',)])
 
-    def test_pending_events_are_batched_and_retried_together(self):
+    def test_chef_rebound_during_get_cannot_claim(self):
         self.assertEqual(self.command('start', 'app').returncode, 0)
-        (self.root / 'fail-send').touch()
-        with sqlite3.connect(self.db) as conn:
-            conn.execute("UPDATE cook_runs SET launch_state='delivery_failed' WHERE id=1")
-        self.update_cook('blocked')
+        self.update_cook('error')
         self.scan()
-        self.assertEqual(len(self.sends()), 1)
-        self.assertIn('launch_delivery_failed', self.sends()[0][-1])
-        self.assertIn('agent_blocked', self.sends()[0][-1])
+        (self.root / 'rebind').touch()
+        refused = self.command('inbox', 'app')
+        self.assertIn('binding changed', refused.stderr)
         with sqlite3.connect(self.db) as conn:
-            self.assertEqual(conn.execute('SELECT delivered FROM watch_events ORDER BY id').fetchall(), [(0,), (0,)])
-        (self.root / 'fail-send').unlink()
-        self.scan()
-        self.assertEqual(len(self.sends()), 2)
-        with sqlite3.connect(self.db) as conn:
-            self.assertEqual(conn.execute('SELECT delivered FROM watch_events ORDER BY id').fetchall(), [(1,), (1,)])
+            self.assertEqual(conn.execute('SELECT chef FROM watch_targets').fetchone()[0], 'replacement')
+            self.assertEqual(conn.execute('SELECT delivered FROM watch_events').fetchone()[0], 0)
 
-    def test_direct_report_does_not_suppress_unverified_done_signal(self):
+    def test_inbox_filters_other_projects_and_superseded_runs(self):
         self.assertEqual(self.command('start', 'app').returncode, 0)
-        subprocess.run(['hc', 'send', 't-chef', 'Cook report'], env=self.env, check=True)
         self.update_cook('done')
         self.scan()
-        self.assertEqual(len(self.sends()), 2)
-        self.assertEqual(self.sends()[0][-1], 'Cook report')
-        self.assertIn('agent_done', self.sends()[1][-1])
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("INSERT INTO projects (name,path,space) VALUES ('other','/other','other')")
+            conn.execute("INSERT INTO tasks (project_id,title) VALUES (2,'other')")
+            conn.execute("""INSERT INTO cook_runs (task_id,project_id,space,worktree,base,hc_session,name,profile,launch_state)
+                VALUES (2,2,'other','/other','abc','core','other','default','failed'),
+                       (1,1,'sp1','/work','abc','core','resumed','default','failed')""")
+            conn.execute("INSERT INTO watch_events (project_id,run_id,state) VALUES (2,2,'other_project')")
+            conn.execute("INSERT INTO watch_events (project_id,run_id,state) VALUES (2,3,'wrong_project')")
+        self.scan()
+        self.assertEqual(self.inbox(), [{'id': 4, 'run_id': 3, 'task_id': 1, 'state': 'launch_failed'}])
+        self.assertEqual([e['id'] for e in self.inbox('--recent')], [4, 1])
+        self.assertNotEqual(self.command('inbox', 'other').returncode, 0)
+        self.assertEqual(self.sends(), [])
 
 
 if __name__ == '__main__':

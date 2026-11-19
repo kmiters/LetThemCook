@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Watch a project's Cooks and deliver actionable events to its Chef."""
+"""Record Cook transitions and let the bound Chef retrieve project updates."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import fcntl
@@ -12,7 +12,8 @@ import subprocess
 import sys
 import time
 
-from ltc_endpoint import verified_chef
+from ltc_endpoint import chef_binding, verify_callback
+from ltc_registry import has_reports
 from ltc_status import inspect_run, stale_start
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,7 +61,10 @@ def main():
     run = commands.add_parser('run', help='Run the watcher loop')
     run.add_argument('project')
     run.add_argument('--interval', type=int, default=15)
-    run.add_argument('--once', action='store_true', help='Observe and deliver once, then exit')
+    run.add_argument('--once', action='store_true', help='Record one observation cycle, then exit')
+    inbox = commands.add_parser('inbox', help='Read new Cook report IDs and transitions from the bound Chef terminal')
+    inbox.add_argument('project')
+    inbox.add_argument('--recent', action='store_true', help='Re-read recent entries without acknowledging them')
     args = parser.parse_args()
     if args.command == 'run' and args.interval < 1:
         parser.error('--interval must be positive')
@@ -78,6 +82,9 @@ def main():
         raise ValueError('Project, Space, or registry identity not found')
     token = identity['token']
     project_id = project['id']
+    if args.command == 'inbox':
+        print(json.dumps(read_inbox(conn, project_id, args.recent)))
+        return 0
     suffix = hashlib.sha256((str(db) + ':' + str(project_id)).encode()).hexdigest()[:16]
     watcher_name = 'ltc-watch-' + suffix
     watcher_labels = {'ltc.watch.registry': token, 'ltc.watch.project': str(project_id)}
@@ -128,7 +135,7 @@ def main():
             raise ValueError('Another watcher already holds the project lock')
         while True:
             try:
-                observe_and_deliver(conn, project_id, token)
+                observe(conn, project_id, token)
             except (OSError, sqlite3.Error, subprocess.SubprocessError) as error:
                 if args.once:
                     raise
@@ -139,9 +146,10 @@ def main():
     return 0
 
 
-def observe_and_deliver(conn, project_id, token):
+def observe(conn, project_id, token):
     runs = [dict(row) for row in conn.execute('''SELECT cook_runs.* FROM cook_runs
-        JOIN tasks ON tasks.id = cook_runs.task_id WHERE cook_runs.project_id = ?
+        JOIN tasks ON tasks.id = cook_runs.task_id AND tasks.project_id = cook_runs.project_id
+        WHERE cook_runs.project_id = ?
         AND tasks.status NOT IN ('done', 'cancelled') ORDER BY cook_runs.id''', (project_id,))]
     with ThreadPoolExecutor(max_workers=8) as pool:
         statuses = list(pool.map(lambda run: inspect_run(run, token)['terminal_status'] if run['terminal'] else None, runs))
@@ -175,21 +183,41 @@ def observe_and_deliver(conn, project_id, token):
             if observation != 'active':
                 conn.execute('INSERT INTO watch_events (project_id, run_id, state) VALUES (?, ?, ?)', (project_id, run['id'], observation))
             conn.commit()
-    events = conn.execute('SELECT * FROM watch_events WHERE project_id = ? AND delivered = 0 ORDER BY id', (project_id,)).fetchall()
-    # Batch a bounded set in one notification. A lost acknowledgement may replay
-    # the whole batch, preserving the existing at-least-once delivery guarantee.
-    for offset in range(0, len(events), 20):
-        batch = events[offset:offset + 20]
-        try:
-            session, chef = verified_chef(conn, project_id)
-            details = '; '.join(f"run {event['run_id']}, {event['state']}" for event in batch)
-            message = (f"Cook events: {details}. Check ltc-status and the Cook's report; "
-                       "this event does not confirm task completion.")
-            call_hc(session, 'send', chef, message, timeout=75)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            break
-        conn.executemany('UPDATE watch_events SET delivered = 1 WHERE id = ?', [(event['id'],) for event in batch])
-        conn.commit()
+
+
+def read_inbox(conn, project_id, recent):
+    chef = os.environ.get('HC_TERMINAL_ID')
+    if not chef:
+        raise ValueError('Read the inbox from the bound Chef terminal')
+    binding = verify_callback(conn, project_id, chef)
+    # Claim only if the verified endpoint still owns this project.
+    with conn:
+        conn.execute('BEGIN' if recent else 'BEGIN IMMEDIATE')
+        if chef_binding(conn, project_id) != binding:
+            raise ValueError('Chef binding changed during inbox verification')
+        scope = """JOIN cook_runs r ON r.id=item.run_id
+            JOIN tasks t ON t.id=r.task_id AND t.project_id=r.project_id
+            JOIN projects p ON p.id=r.project_id
+            WHERE p.id=?"""
+        if not recent:
+            scope += """ AND r.space=p.space AND t.status NOT IN ('done','cancelled')
+                AND NOT EXISTS (SELECT 1 FROM cook_runs newer WHERE newer.project_id=r.project_id
+                    AND newer.worktree=r.worktree AND newer.id>r.id)"""
+
+        def entries(table, flag, extra):
+            where = scope if recent else scope + f' AND item.{flag}=0'
+            if table == 'watch_events':
+                where += ' AND item.project_id=r.project_id'
+            order = 'DESC' if recent else 'ASC'
+            rows = conn.execute(f"""SELECT item.id, r.id AS run_id, t.id AS task_id {extra}
+                FROM {table} item {where} ORDER BY item.id {order} LIMIT 20""", (project_id,)).fetchall()
+            if not recent:
+                conn.executemany(f'UPDATE {table} SET {flag}=1 WHERE id=?', [(row['id'],) for row in rows])
+            return [dict(row) for row in rows]
+
+        events = entries('watch_events', 'delivered', ', item.state')
+        reports = entries('cook_reports', 'notified', '') if has_reports(conn) else []
+        return {'events': events, 'reports': reports}
 
 
 if __name__ == '__main__':
