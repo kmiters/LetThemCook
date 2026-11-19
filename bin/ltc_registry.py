@@ -62,6 +62,23 @@ def ensure_briefs(conn):
     )''')
 
 
+def update_brief(conn, task_id, fields):
+    if not fields:
+        return
+    if not fields.keys() <= set(BRIEF_FIELDS):
+        raise ValueError('Unknown task brief field')
+    conn.execute('INSERT OR IGNORE INTO task_briefs (task_id) VALUES (?)', (task_id,))
+    conn.execute('UPDATE task_briefs SET ' + ', '.join(key + ' = ?' for key in fields)
+                 + ' WHERE task_id = ?', (*fields.values(), task_id))
+
+
+def add_task(conn, project_id, member_id, title, description, fields):
+    task_id = conn.execute('INSERT INTO tasks (project_id, member_id, title, description) VALUES (?, ?, ?, ?)',
+                           (project_id, member_id, title, description)).lastrowid
+    update_brief(conn, task_id, fields)
+    return task_id
+
+
 def ensure_task_status_events(conn):
     conn.execute('''CREATE TABLE IF NOT EXISTS task_status_events (
         id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id),

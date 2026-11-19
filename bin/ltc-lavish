@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Open a web preview or saved Cook report in Lavish and file feedback in its chosen backlog."""
+import argparse
+from contextlib import closing, contextmanager
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import sys
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+from ltc_lavish_report import render_report, saved_report
+from ltc_lavish_tools import capture, check_server, decode, free_port, lavish, lavish_env, stop_capture
+from ltc_registry import add_task, ensure_briefs, ensure_runs, review_url
+from ltc_workspace import ensure_members, select_member
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def setup(conn):
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        ensure_runs(conn)
+        ensure_members(conn)
+        ensure_briefs(conn)
+        conn.execute('''CREATE TABLE IF NOT EXISTS lavish_reviews (
+            id TEXT PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id),
+            member_id INTEGER REFERENCES project_members(id), source TEXT NOT NULL, rendered TEXT,
+            port INTEGER NOT NULL, url TEXT, phase TEXT NOT NULL)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS lavish_imports (
+            review TEXT NOT NULL REFERENCES lavish_reviews(id), receipt TEXT NOT NULL,
+            task_id INTEGER REFERENCES tasks(id), PRIMARY KEY(review, receipt))''')
+
+
+@contextmanager
+def locked(folder):
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('Another operation owns this review. Finish that operation first.') from None
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def owner(conn, args):
+    project = conn.execute('SELECT id FROM projects WHERE name=?', (args.project,)).fetchone()
+    if not project:
+        raise ValueError(f'Project not found: {args.project}')
+    return project[0], select_member(conn, project[0], args.member)
+
+
+def phase(conn, review, value):
+    with conn:
+        conn.execute('UPDATE lavish_reviews SET phase=? WHERE id=?', (value, review))
+
+
+def artifact(folder):
+    # Lavish serves sibling assets. Receipts and provider state belong outside this directory.
+    return folder / 'page' / 'snapshot.html'
+
+
+def open_review(conn, args, root):
+    project, member = owner(conn, args)
+    report = None
+    binaries = ['lavish-axi', 'node']
+    if args.command == 'report':
+        report = saved_report(conn, project, member, args.task_id, args.report_id)
+        source = f"ltc:project/{project}/task/{args.task_id}/run/{report['run_id']}/report/{report['report_id']}"
+    else:
+        source = args.url
+        if not review_url(source) or urlsplit(source).port == 0:
+            raise ValueError('Supply an absolute HTTP(S) preview URL without embedded credentials')
+        binaries.append('chrome-devtools-axi')
+    for binary in binaries:
+        if not shutil.which(binary):
+            raise ValueError(f'Install {binary} before opening this review')
+    decode(b'ready: true')
+    review = uuid4().hex
+    folder = root / review
+    port = free_port()
+    if root.resolve() != root:
+        raise ValueError('Review directory must reside beside the selected registry')
+    root.mkdir(mode=0o700, exist_ok=True)
+    folder.mkdir(mode=0o700)
+    with locked(folder):
+        with conn:
+            conn.execute('''INSERT INTO lavish_reviews (id, project_id, member_id, source, port, phase)
+                            VALUES (?,?,?,?,?,'preparing')''', (review, project, member, source, port))
+        close = [str(Path(__file__).resolve()), '--db', str(Path(args.db).expanduser().resolve()),
+                 'end', args.project, review]
+        if args.member is not None:
+            close.extend(['--member', args.member])
+        print('Finalize with ' + shlex.join(close), file=sys.stderr, flush=True)
+        page = artifact(folder)
+        page.parent.mkdir()
+        try:
+            if report is None:
+                rendered, extent = capture(folder, page, source)
+            else:
+                page.write_text(render_report(report, args.project, args.member), encoding='utf-8')
+                rendered, extent = source, 'report'
+        except BaseException:
+            if not (folder / 'browser').exists():
+                phase(conn, review, 'cleanup')
+                shutil.rmtree(folder)
+                phase(conn, review, 'ended')
+            raise
+        phase(conn, review, 'opening')
+        result = lavish(lavish_env(folder, port), str(page), '--no-open')['session']
+        url = result['url']
+        if (result.get('file') != str(page) or result.get('status') != 'opened'
+                or not re.fullmatch(rf'http://127\.0\.0\.1:{port}/session/[0-9a-f]{{16}}', url)):
+            raise ValueError('Lavish did not return a local review link for this snapshot')
+        with conn:
+            conn.execute("UPDATE lavish_reviews SET phase='open', url=?, rendered=? WHERE id=?",
+                         (url, rendered, review))
+        opened = dict(review=review, url=url, project=args.project, member=args.member, capture=extent)
+        if report is not None:
+            opened.update(task=args.task_id, run=report['run_id'], report=report['report_id'])
+        return opened
+
+
+def preserve_attachments(folder, row, prompts):
+    # The provider owns the attachment directory. Never follow paths named by feedback.
+    key = urlsplit(row['url']).path.split('/')[-1]
+    for prompt in prompts:
+        attachments = prompt.get('attachments')
+        if not isinstance(attachments, list):
+            continue
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            name = item.get('id')
+            if not isinstance(name, str) or not re.fullmatch(r'[a-f0-9]{64}\.(png|jpg|webp)', name):
+                item['availability'] = 'unverified attachment reference'
+                continue
+            source = folder / 'provider' / 'attachments' / key / name
+            if str(source) != item.get('path') or source.resolve() != source:
+                item['availability'] = 'unverified attachment reference'
+                continue
+            dest = folder / 'feedback' / name
+            if not dest.exists():
+                if not source.is_file():
+                    item['availability'] = 'file no longer available from Lavish'
+                    continue
+                dest.parent.mkdir(mode=0o700, exist_ok=True)
+                # Same filesystem. The evidence survives provider eviction and retries.
+                os.link(source, dest, follow_symlinks=False)
+            item['path'] = str(dest)
+
+
+def collect(conn, row, folder, env, lock_fd):
+    review = row['id']
+    pending = list(folder.glob('receipt-*.toon'))
+    if len(pending) > 1:
+        raise ValueError('Multiple pending receipts. Preserve the review for inspection.')
+    receipt = pending[0] if pending else folder / f'receipt-{uuid4().hex}.toon'
+    previous = conn.execute('SELECT task_id FROM lavish_imports WHERE review=? AND receipt=?',
+                            (review, receipt.name)).fetchone()
+    if previous:
+        receipt.unlink()
+        return dict(status='already imported', task=previous[0])
+    if not receipt.exists() or not receipt.stat().st_size:
+        check_server(env)
+        with receipt.open('wb') as spool:
+            os.fsync(lock_fd)  # Make the receipt directory entry durable before consuming feedback.
+            # Keep the per-review lock in the CLI too if its Python parent exits.
+            result = subprocess.run(['lavish-axi', 'poll', str(artifact(folder)), '--owner', 'ltc-' + review],
+                                    env=env, stdout=spool, pass_fds=(lock_fd,))
+            os.fsync(spool.fileno())
+        if result.returncode:
+            raw = receipt.read_bytes()
+            # Only a structured CLI error or no output proves there is no receipt to apply.
+            error = decode(raw) if raw else {}
+            if not raw or ('error' in error and 'session' not in error):
+                receipt.unlink()
+            raise ValueError(f'Lavish poll failed ({result.returncode}): {str(error.get("error", ""))[:300]!r}')
+    data = decode(receipt.read_bytes())
+    session = data.get('session') if isinstance(data, dict) else None
+    if not isinstance(session, dict):
+        raise ValueError(f'Missing Lavish session. Original output retained in {receipt}')
+    status = session.get('status')
+    if (session.get('file') != str(artifact(folder)) or
+            status not in ('feedback', 'ended', 'waiting', 'browser_disconnected')):
+        raise ValueError(f'Unknown Lavish result. Original output retained in {receipt}')
+    if status == 'feedback' and ('prompts' not in data or 'dom_snapshot' not in data):
+        raise ValueError(f'Incomplete feedback. Original output retained in {receipt}')
+    prompts = data.get('prompts', [])
+    failures = data.get('artifact_failures', [])
+    if not isinstance(prompts, list) or not all(isinstance(prompt, dict) for prompt in prompts):
+        raise ValueError(f'Invalid feedback. Original output retained in {receipt}')
+    task = None
+    terminal = status == 'ended' or session.get('session_ended') is True
+    with conn:
+        if prompts:
+            preserve_attachments(folder, row, prompts)
+            evidence = dict(source=row['source'], rendered=row['rendered'], review=review, annotations=prompts)
+            if failures:
+                evidence['artifact_failures'] = failures
+            task = add_task(conn, row['project_id'], row['member_id'], 'Review Lavish feedback',
+                            json.dumps(evidence, ensure_ascii=False, indent=2),
+                            {'context': 'Submitted reviewer evidence. Triage this batch in its assigned backlog.'})
+        conn.execute('INSERT INTO lavish_imports (review, receipt, task_id) VALUES (?,?,?)',
+                     (review, receipt.name, task))
+        if terminal:
+            conn.execute("UPDATE lavish_reviews SET phase='drained' WHERE id=?", (review,))
+    receipt.unlink()
+    return dict(status=status, task=task, ended=terminal, artifact_failures=failures)
+
+
+def finish(conn, row, folder, env):
+    stop_capture(folder)
+    if (folder / 'provider').exists():
+        result = lavish(env, 'stop')
+        if result['server']['status'] not in ('stopped', 'not-running'):
+            raise ValueError('Lavish server is still running. Retry end to finish cleanup.')
+    # Keep only local evidence that a saved task references.
+    for name in ('page', 'provider'):
+        if (folder / name).exists():
+            shutil.rmtree(folder / name)
+    if not any(folder.iterdir()):
+        folder.rmdir()
+    phase(conn, row['id'], 'ended')
+
+
+def existing(conn, args, root):
+    project, member = owner(conn, args)
+    def load():
+        row = conn.execute('SELECT * FROM lavish_reviews WHERE id=? AND project_id=? AND member_id IS ?',
+                           (args.review, project, member)).fetchone()
+        if not row:
+            raise ValueError('Review not found for this project and member')
+        return row
+    row = load()
+    if not re.fullmatch('[0-9a-f]{32}', row['id']):
+        raise ValueError('Invalid review identity in registry')
+    folder = root / row['id']
+    if folder.resolve() != folder:
+        raise ValueError('Review directory must reside beside the selected registry')
+    if row['phase'] == 'ended':
+        return dict(status='ended')
+    if not folder.exists() and row['phase'] == 'cleanup':
+        phase(conn, row['id'], 'ended')
+        return dict(status='ended')
+    with locked(folder) as fd:
+        row = load()
+        env = lavish_env(folder, row['port'])
+        if args.command == 'import':
+            if row['phase'] in ('ended', 'drained', 'cleanup'):
+                return dict(status='ended')
+            if row['phase'] != 'open':
+                raise ValueError('Review is not open. Run end to finalize it.')
+            return collect(conn, row, folder, env, fd)
+        deliveries = []
+        if row['phase'] == 'open':
+            result = lavish(env, 'end', str(artifact(folder)))['session']
+            if result.get('status') != 'ended' or result.get('file') != str(artifact(folder)):
+                raise ValueError('Lavish did not confirm the end of this review')
+            phase(conn, row['id'], 'ending')
+        while load()['phase'] == 'ending':
+            delivery = collect(conn, load(), folder, env, fd)
+            deliveries.append(delivery)
+            if delivery['status'] in ('waiting', 'browser_disconnected'):
+                raise ValueError('Lavish has not confirmed final delivery. Retry end.')
+        # A receipt can survive the commit marking the final batch drained.
+        row = load()
+        for receipt in folder.glob('receipt-*.toon'):
+            if not conn.execute('SELECT 1 FROM lavish_imports WHERE review=? AND receipt=?',
+                                (row['id'], receipt.name)).fetchone():
+                raise ValueError(f'Unfiled receipt retained in {receipt}')
+            receipt.unlink()
+        phase(conn, row['id'], 'cleanup')
+        finish(conn, row, folder, env)
+        return dict(status='ended', deliveries=deliveries)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--db', default=os.environ.get('LTC_DB', ROOT / '.letthemcook/registry.sqlite3'))
+    commands = parser.add_subparsers(dest='command', required=True)
+    for cmd, help_text in [('open', 'Capture an HTTP(S) page and print the local review link'),
+                           ('report', 'Open a saved Cook report for a registered project and task'),
+                           ('import', 'Wait for and file one submitted batch'),
+                           ('end', 'Close the review, import final feedback and clean up')]:
+        sub = commands.add_parser(cmd, help=help_text)
+        sub.add_argument('project', help='Registered project name')
+        if cmd == 'report':
+            sub.add_argument('task_id', type=int)
+            sub.add_argument('--report-id', type=int, help='Select a specific report (default: latest for this task)')
+        else:
+            sub.add_argument('url' if cmd == 'open' else 'review')
+        sub.add_argument('--member', help='Required for workspace projects')
+    args = parser.parse_args()
+    db = Path(args.db).expanduser().resolve()
+    os.umask(0o077)
+    with closing(sqlite3.connect(db.as_uri() + '?mode=rw', uri=True, timeout=10)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        setup(conn)
+        root = db.with_name(db.name + '.lavish')
+        result = open_review(conn, args, root) if args.command in ('open', 'report') else existing(conn, args, root)
+        print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit('Interrupted. Retry import or end for the same review.')
+    except (OSError, KeyError, TypeError, ValueError, sqlite3.Error, subprocess.SubprocessError) as exc:
+        sys.exit(f'ltc-lavish: {exc}')

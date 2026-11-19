@@ -21,3 +21,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+# shadcn/ui
+
+The Cook report renderer uses static adaptations of shadcn/ui's New York v4 Card, secondary Badge, and default Button rendered as a link. Copyright (c) 2023 shadcn. The MIT license in the report stylesheet is included in each generated report. [Component sources](https://github.com/shadcn-ui/ui/tree/main/apps/v4/registry/new-york-v4/ui) · [Included license](reports/cook-report.css)

@@ -8,8 +8,8 @@ import sqlite3
 import subprocess
 import sys
 
-from ltc_workspace import check_single_checkout, ensure_members, members_for, workspace_checkouts
-from ltc_registry import (BRIEF_FIELDS, ensure_briefs, ensure_runs,
+from ltc_workspace import check_single_checkout, ensure_members, members_for, select_member, workspace_checkouts
+from ltc_registry import (BRIEF_FIELDS, add_task, update_brief, ensure_briefs, ensure_runs,
                           ensure_task_status_events, get_brief, task_reports)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -125,12 +125,6 @@ def main():
             task['reports'] = task_reports(conn, task['project_id'], task_id)
             return task
 
-        def update_brief(task_id, fields):
-            if not fields:
-                return
-            conn.execute('INSERT OR IGNORE INTO task_briefs (task_id) VALUES (?)', (task_id,))
-            conn.execute('UPDATE task_briefs SET ' + ', '.join(key + ' = ?' for key in fields) + ' WHERE task_id = ?', (*fields.values(), task_id))
-
         if args.command == 'project':
             if args.action == 'add':
                 if args.member:
@@ -179,16 +173,9 @@ def main():
                 result = [dict(row) for row in conn.execute(query + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY cook_runs.id', values)]
         elif args.action == 'add':
             pid = project_id(args.project)
-            members = members_for(conn, pid)
-            member_id = next((m['id'] for m in members if m['name'] == args.member), None)
-            if members and member_id is None:
-                raise ValueError('Select a registered repository with --member: ' + ', '.join(m['name'] for m in members))
-            if not members and args.member is not None:
-                raise ValueError('--member is only valid for a workspace')
-            cur = conn.execute('INSERT INTO tasks (project_id, title, description, member_id) VALUES (?, ?, ?, ?)',
-                               (pid, args.title, args.description, member_id))
-            update_brief(cur.lastrowid, {key: getattr(args, key) for key in BRIEF_FIELDS if getattr(args, key) is not None})
-            result = task_row(cur.lastrowid)
+            member_id = select_member(conn, pid, args.member)
+            fields = {key: getattr(args, key) for key in BRIEF_FIELDS if getattr(args, key) is not None}
+            result = task_row(add_task(conn, pid, member_id, args.title, args.description, fields))
         elif args.action == 'list':
             where, values = [], []
             if args.project:
@@ -211,7 +198,7 @@ def main():
             if updates.get('status') == 'done' and existing_task['status'] != 'done':
                 conn.execute('INSERT INTO task_status_events(project_id, task_id, from_status, to_status) VALUES (?, ?, ?, ?)',
                              (existing_task['project_id'], args.id, existing_task['status'], 'done'))
-            update_brief(args.id, brief_updates)
+            update_brief(conn, args.id, brief_updates)
             result = task_row(args.id)
         print(json.dumps(result, ensure_ascii=False))
     return 0

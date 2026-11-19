@@ -1,0 +1,136 @@
+/*!
+ * Static HTML/CSS adaptations of shadcn/ui New York v4 Card, Badge and Button.
+ * https://github.com/shadcn-ui/ui/tree/main/apps/v4/registry/new-york-v4/ui
+ * MIT License
+ * Copyright (c) 2023 shadcn
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+:root {
+  color-scheme: light dark;
+  --background: #f7f7f7;
+  --foreground: #202020;
+  --card: #ffffff;
+  --card-foreground: #292929;
+  --primary: #242424;
+  --primary-foreground: #ffffff;
+  --secondary: #ebebeb;
+  --secondary-foreground: #404040;
+  --muted-foreground: #595959;
+  --border: #dedede;
+  --ring: #636363;
+  --radius: .65rem;
+  font-family: Inter, system-ui, sans-serif;
+  color: var(--foreground);
+  background: var(--background);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #141414;
+    --foreground: #f2f2f2;
+    --card: #202020;
+    --card-foreground: #e5e5e5;
+    --primary: #dedede;
+    --primary-foreground: #1a1a1a;
+    --secondary: #333333;
+    --secondary-foreground: #dedede;
+    --muted-foreground: #b3b3b3;
+    --border: #3c3c3c;
+    --ring: #b8b8b8;
+  }
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: var(--background); }
+main {
+  --gutter: clamp(1rem, 4vw, 2rem);
+  width: min(100%, 49rem);
+  margin-inline: auto;
+  padding: clamp(1.75rem, 5vw, 4rem) var(--gutter);
+  overflow-wrap: anywhere;
+}
+.report-header { margin-block-end: clamp(1.5rem, 4vw, 2.25rem); }
+.identity, .byline { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; }
+.project { color: var(--muted-foreground); font-size: .875rem; font-weight: 550; }
+[data-slot="badge"] {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: .2rem .65rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: .75rem;
+  font-weight: 650;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+h1 {
+  margin: .875rem 0;
+  font-size: clamp(1.75rem, 4.2vw, 2.65rem);
+  font-weight: 650;
+  line-height: 1.12;
+  letter-spacing: -.04em;
+  text-wrap: balance;
+}
+.byline { gap: .4rem 1rem; font-size: .8125rem; line-height: 1.5; color: var(--muted-foreground); }
+.byline span, time { font-variant-numeric: tabular-nums; }
+[data-slot="card"] {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-block: 1rem;
+  padding: clamp(1.125rem, 3.5vw, 1.75rem);
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 1.4);
+}
+[data-slot="card-title"] {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -.02em;
+}
+[data-slot="card-content"] p {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+[data-slot="card-content"] br { display: block; }
+.outcome p:first-child { font-size: 1.1rem; }
+.validation p + p { margin-top: .5rem; }
+[data-slot="card-footer"] { padding-top: .25rem; }
+[data-slot="button"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .625rem;
+  min-height: 2.5rem;
+  padding: .5rem .95rem;
+  border-radius: var(--radius);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: .875rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+[data-slot="button"]:hover { text-decoration: underline; text-underline-offset: .2em; }
+[data-slot="button"]:focus-visible { outline: 3px solid var(--ring); outline-offset: 3px; }

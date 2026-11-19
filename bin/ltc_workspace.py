@@ -87,6 +87,18 @@ def members_for(conn, project_id):
                                               (project_id,))]
 
 
+def select_member(conn, project_id, name):
+    members = members_for(conn, project_id)
+    if not members and name is None:
+        return None
+    if not members:
+        raise ValueError('--member is only valid for a workspace')
+    for member in members:
+        if member['name'] == name:
+            return member['id']
+    raise ValueError('Select a registered repository with --member: ' + ', '.join(m['name'] for m in members))
+
+
 def member_for_task(conn, project_id, task_id):
     """Load a task's member even on a legacy registry opened read-only."""
     if not has_members_table(conn):

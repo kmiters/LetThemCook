@@ -23,6 +23,38 @@ The read-only board has To do, In progress, Blocked, and Done columns. Cancelled
 
 The board is served on `127.0.0.1` and is usable from that machine. [Board service and ticket URLs](operations.md#board-service)
 
+## Annotate a web preview with Lavish
+
+Ask the Chef to capture a specific HTTP(S) preview for a registered project. From the LetThemCook checkout, run the following with your real project and URL.
+
+```sh
+bin/ltc-lavish open my-app http://127.0.0.1:8080/settings
+```
+
+Open the returned `url` on this machine and keep the returned `review` ID. In annotate mode, click a heading, label, or control in the picture and queue your note. You can also write a message in the review panel. Choose **Send to Agent** to submit a batch or **Send & End** to submit the final batch. Notes still in the browser composer or queue are drafts.
+
+```sh
+bin/ltc-lavish import my-app REVIEW_ID
+bin/ltc-lavish end my-app REVIEW_ID
+```
+
+`import` waits in the foreground for one delivery and returns its task ID. Repeat for later batches. `end` closes the review, collects any submitted final feedback, and releases its local resources. Run it even after **Send & End**. Each batch creates one **To do** task for the Chef to triage. Feedback has no authority to assign work, approve changes, or update another task.
+
+For a workspace, append `--member REPOSITORY_NAME` to all three commands. Use the same registry throughout. Set `LTC_DB` or pass `--db PATH` before the subcommand. [Lavish requirements, privacy, and recovery](operations.md#lavish-review-runtime)
+
+### Annotate a saved Cook report
+
+To discuss a Cook's result, open the report itself. Supply the registered project and task ID. Append the same `--member REPOSITORY_NAME` to each command for workspace tasks.
+
+```sh
+bin/ltc-lavish report my-app 12
+bin/ltc-lavish report my-app 12 --report-id 7
+```
+
+The first command selects the latest saved report for task 12. The second selects report 7 from that task's history. Open the returned `url`. Select text in the outcome or click a validation line and queue an annotation. **Open review** follows the saved report's optional preview link in a new tab when using Lavish's explore mode.
+
+Use `bin/ltc-lavish import my-app REVIEW_ID` to file submitted feedback and `bin/ltc-lavish end my-app REVIEW_ID` to close the report and collect any final submission. The review ID comes from the command's `review` field. Imported feedback identifies the source project, task, run and saved report.
+
 ## Check progress
 
 Ask the Chef what is running or blocked. From the LetThemCook checkout, use `bin/ltc-status my-app` for tasks and recorded terminal status, or `bin/ltc-status --all my-app` for full history.
