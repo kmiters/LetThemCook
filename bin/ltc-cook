@@ -7,6 +7,7 @@ import sqlite3
 import sys
 
 from ltc_harness import EFFORTS
+from ltc_prompt import ROLES
 from ltc_workspace import member_for_task
 from ltc_registry import format_task, get_brief
 
@@ -21,6 +22,7 @@ def main():
     parser.add_argument('legacy_profile', nargs='?', metavar='profile')
     parser.add_argument('--profile', help='Cook complexity profile')
     parser.add_argument('--harness', choices=EFFORTS, help='Cook CLI')
+    parser.add_argument('--role', choices=ROLES, help='Cook specialization (default: generic)')
     parser.add_argument('--config', help='JSON configuration')
     args = parser.parse_args()
     if args.profile and args.legacy_profile:
@@ -55,7 +57,7 @@ def main():
     command = [launcher, '--project', task['path'], '--space', task['space'], '--name', name,
                '--task', format_task(task), '--chef', chef, '--task-id', task_id]
     for key, value in (('--profile', args.profile or args.legacy_profile), ('--harness', args.harness),
-                       ('--config', args.config)):
+                       ('--role', args.role), ('--config', args.config)):
         if value is not None:
             command.extend([key, value])
     os.execv(launcher, command)

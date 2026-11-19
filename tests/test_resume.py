@@ -107,8 +107,8 @@ else: print(json.dumps({'address':'t-new', 'first_message':{'sent':True}}))
                                 env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         with sqlite3.connect(self.db) as conn:
-            rows = conn.execute('SELECT id, harness, model, reasoning_effort FROM cook_runs ORDER BY id').fetchall()
-        self.assertEqual(rows, [(1, None, None, None), (2, 'codex', 'gpt-6.2-sol', 'low')])
+            rows = conn.execute('SELECT id, harness, model, reasoning_effort, role FROM cook_runs ORDER BY id').fetchall()
+        self.assertEqual(rows, [(1, None, None, None, 'generic'), (2, 'codex', 'gpt-6.2-sol', 'low', 'generic')])
 
     def test_refuses_live_mismatched_and_missing_terminal(self):
         for state, task in [('live', '1'), ('finished', 'wrong')]:

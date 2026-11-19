@@ -10,6 +10,7 @@ from pathlib import Path
 from ltc_claude_session import confirm_transcript
 from ltc_endpoint import verify_callback
 from ltc_harness import CookRoute, resolve_route
+from ltc_prompt import cook_instructions
 from ltc_workspace import member_for_run, member_label_matches, member_prompt
 from ltc_registry import cook_reporting_context, ensure_runs, format_task, get_brief, start_run, terminal_name
 import sqlite3
@@ -38,19 +39,20 @@ def main():
         raise ValueError('Registry not found')
     config_path = Path(args.config).resolve()
     config = json.loads(config_path.read_text())
-    prompt_base = (config_path.parent / config['prompts']['cook']).resolve().read_text()
     conn = sqlite3.connect(db, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys = ON')
     conn.execute('BEGIN IMMEDIATE')
     row = conn.execute('''SELECT cook_runs.*, tasks.title, tasks.description, tasks.status AS task_status,
-        projects.path AS project_path, projects.space AS current_space, registry_identity.token
+        projects.path AS project_path, projects.space AS current_space, projects.name AS project_name, registry_identity.token
         FROM cook_runs JOIN tasks ON tasks.id = cook_runs.task_id
         JOIN projects ON projects.id = cook_runs.project_id AND tasks.project_id = projects.id
         CROSS JOIN registry_identity WHERE cook_runs.id = ? AND registry_identity.id = 1''', (args.run_id,)).fetchone()
     if row is None:
         raise ValueError('Run or registry identity not found')
     run = dict(row)
+    role = run.get('role', 'generic')
+    prompt_base = cook_instructions(config, config_path.parent, role)
     member = member_for_run(conn, run)
     task_brief = format_task({'id': run['task_id'], 'title': run['title'], 'description': run['description'], 'brief': get_brief(conn, run['task_id'])})
     if run['task_status'] in ('done', 'cancelled'):
@@ -113,13 +115,13 @@ def main():
     prompt = (prompt_base + '\n\n# Resumed task\n' + task_brief
               + '\n\n' + context + ' Inspect existing changes and prior context before editing; preserve the work. Do not assume the task is complete.'
               + '\nPrevious run ID: ' + str(run['id']) + '\nYour worktree: ' + str(worktree)
-              + cook_reporting_context(db, ROOT))
+              + cook_reporting_context(db, ROOT, run['project_name']))
     if member:
         prompt += member_prompt(member, run['project_path'])
     harness_cmd = route.command(prompt, claude_session_id=session_id, resume=native)
     ensure_runs(conn)
     new_id = start_run(conn, run['task_id'], run['project_id'], run['space'], worktree,
-                       run['base'], run['hc_session'], name, route, session_id)
+                       run['base'], run['hc_session'], name, route, session_id, role=role)
     if member:
         conn.execute('UPDATE cook_runs SET member_id = ? WHERE id = ?', (member['id'], new_id))
     conn.commit()
@@ -162,7 +164,7 @@ def main():
     recovery = {'conversation': 'native_requested' if native else 'fresh', 'claude_session_id': session_id}
     if native:
         recovery['readiness'] = 'Exact UUID requested. Inspect the Claude terminal to confirm recovery. Use --fresh only intentionally.'
-    print(json.dumps({**recovery, 'run_id': new_id, 'previous_run_id': run['id'], 'member': member['name'] if member else None, **asdict(route), 'worktree': str(worktree), 'herdr': herdr}))
+    print(json.dumps({**recovery, 'run_id': new_id, 'previous_run_id': run['id'], 'member': member['name'] if member else None, 'role': role, **asdict(route), 'worktree': str(worktree), 'herdr': herdr}))
     return 0
 
 

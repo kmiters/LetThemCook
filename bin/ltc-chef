@@ -135,6 +135,8 @@ def main():
                 if project.get('members'):
                     prompt += ('\n\n# Assigned workspace\nWorkspace root: ' + str(path)
                                + '\nProject description: ' + project['description']
+                               + '\nBefore dispatch read “One Chef for a workspace” in the assigned LetThemCook docs/configuration.md.'
+                               + ' Trace affected consumers and create one task per affected checkout with --member.'
                                + '\nRegistered member checkouts:\n'
                                + '\n'.join(f"- {m['name']}: {m['path']}" for m in project['members']))
                 harness = project['chef_harness']

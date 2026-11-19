@@ -49,6 +49,10 @@ LTC checks that the Cook executable is on PATH and the configuration is valid be
 
 New Chef tabs load [prompts/chef.md](../prompts/chef.md) from the LetThemCook installation. For Cooks, `ltc-cook --config PATH` and `ltc --config PATH` select a JSON file. Its `prompts.cook` path is relative to that file. `ltc-resume --config PATH` likewise selects the current Cook prompt and supplies the profile mapping for historical runs. Changes take effect at launch. Agent and tool permissions still apply.
 
+The optional `--role` flag selects instructions independently of the profile and harness. Use `designer` when success depends on the user's path, layout or interactions. Use `developer` for implementation, diagnosis or tests. Use `generic` (the default) for other work. Generic uses just the configured Cook base. A specialist receives that base and its own short role file before the assigned task brief.
+
+Existing configs can use either shipped role file without changes. To replace one, set `prompts.roles.designer` or `prompts.roles.developer` to a path relative to the config. Supply the same `--config PATH` on resume to reuse custom instructions.
+
 ## Optional agent shortcuts
 
 With the supplied skills installed, Codex accepts `$tasks` and `$whatsup`, also available in its `/skills` picker. Claude Code accepts `/orders` and `/whatsup`. Claude reserves `/tasks` for its own session work. The supplied command helpers accept an optional registered project name. [Codex skill discovery](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills) · [Claude Code skills](https://code.claude.com/docs/en/skills) · [Claude Code commands](https://code.claude.com/docs/en/commands)
@@ -86,3 +90,5 @@ bin/ltc-db task add my-workspace 'Update the shared button' --member design-syst
 The Chef starts at the workspace root. Dispatch uses the normal `ltc-cook PROJECT TASK_ID` command and creates the worktree in the task's member repository. Run identity checks, status, resume, and close use the same member. The Chef integrates accepted changes into that member's local main.
 
 For changes spanning repositories, trace the affected consumers, record a task per affected member, and specify upstream inputs and verification order. Sibling Cook worktrees have separate committed bases. Coordinate a reproducible shared input for cross-repository checks.
+
+Read the workspace guide, member instructions and dependency manifests. For mobile-prototypes, trace the design system, then shell, then starter, including starter's direct design-system imports. Record related task IDs, checks and the committed inputs each Cook needs.

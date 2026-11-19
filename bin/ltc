@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ltc_endpoint import verify_callback
 from ltc_harness import EFFORTS, resolve_route
+from ltc_prompt import ROLES, cook_instructions
 from ltc_workspace import check_member_worktree, checked_member_path, member_for_task, member_prompt
 from ltc_registry import connect, cook_reporting_context, ensure_runs, start_run, terminal_name
 
@@ -30,6 +31,7 @@ def main():
     parser.add_argument('--name', required=True, help='Unique task name')
     parser.add_argument('--harness', choices=EFFORTS, help='Cook CLI (default from config, otherwise codex)')
     parser.add_argument('--profile', help='Configured Cook model profile')
+    parser.add_argument('--role', choices=ROLES, default='generic', help='Cook specialization')
     parser.add_argument('--task', required=True, help='Self-contained task brief')
     parser.add_argument('--base', default='HEAD', help='Committed base (default: HEAD)')
     parser.add_argument('--chef', help='Parent Chef terminal address (defaults to HC_TERMINAL_ID)')
@@ -44,7 +46,7 @@ def main():
     config = json.loads(config_path.read_text())
     route = resolve_route(config, args.profile or config['default_profile'],
                           args.harness or config.get('default_harness', 'codex'))
-    cook_prompt = (config_path.parent / config['prompts']['cook']).resolve().read_text()
+    cook_prompt = cook_instructions(config, config_path.parent, args.role)
     project = Path(run(['git', '-C', args.project, 'rev-parse', '--show-toplevel']).stdout.strip()).resolve()
     base = run(['git', '-C', str(project), 'rev-parse', '--verify', '--end-of-options', args.base + '^{commit}']).stdout.strip()
     target = project / '.letthemcook' / 'worktrees' / args.name
@@ -62,7 +64,7 @@ def main():
             raise ValueError(f'Registry not found: {db_path}')
         conn = connect(db_path)
         conn.execute('BEGIN IMMEDIATE')
-        row = conn.execute('SELECT projects.id, projects.path, projects.space, tasks.title, tasks.status FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (args.task_id,)).fetchone()
+        row = conn.execute('SELECT projects.id, projects.path, projects.space, tasks.title, tasks.status, projects.name FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?', (args.task_id,)).fetchone()
         if row is None or row[2] != args.space:
             raise ValueError('Task, project checkout and Space do not match the registry')
         if row[4] in ('done', 'cancelled'):
@@ -75,17 +77,19 @@ def main():
         if member:
             check_member_worktree(checkout, target)
             prompt += member_prompt(member, row[1])
-        prompt += cook_reporting_context(db_path, ROOT)
+        prompt += cook_reporting_context(db_path, ROOT, row[5])
         args.chef = args.chef or os.environ.get('HC_TERMINAL_ID')
         if args.chef:
             verify_callback(conn, row[0], args.chef)
     elif args.chef:
         raise ValueError('A Chef callback requires a registered --task-id')
+    else:
+        prompt += '\nLetThemCook directory: ' + str(ROOT)
     session_id = str(uuid4()) if conn is not None and route.harness == 'claude' else None
     harness_cmd = route.command(prompt, claude_session_id=session_id)
     if conn is not None:
         run_id = start_run(conn, args.task_id, row[0], args.space, target, base,
-                           os.environ.get('HC_SESSION') or 'default', args.name, route, session_id)
+                           os.environ.get('HC_SESSION') or 'default', args.name, route, session_id, role=args.role)
         if member:
             conn.execute('UPDATE cook_runs SET member_id = ? WHERE id = ?', (member['id'], run_id))
         conn.commit()
@@ -150,7 +154,7 @@ def main():
     except sqlite3.Error as error:
         print(json.dumps({'error': 'registry_update_failed', 'run_id': run_id, 'worktree': str(target), 'herdr': herdr, 'detail': str(error)}), file=sys.stderr)
         return 1
-    print(json.dumps({'run_id': run_id, 'worktree': str(target), 'base': base, 'claude_session_id': session_id, 'member': member['name'] if member else None, **asdict(route), 'uncommitted_changes_excluded': bool(changes), 'herdr': herdr}))
+    print(json.dumps({'run_id': run_id, 'worktree': str(target), 'base': base, 'claude_session_id': session_id, 'member': member['name'] if member else None, 'role': args.role, **asdict(route), 'uncommitted_changes_excluded': bool(changes), 'herdr': herdr}))
     return 0
 
 

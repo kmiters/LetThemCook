@@ -46,7 +46,7 @@ bin/ltc-db task add my-app 'Fix the settings save button' \
   --context 'The settings page currently ignores Save' \
   --scope 'Settings page' --acceptance 'Changes survive reload' \
   --checks 'Reopen settings after saving'
-bin/ltc-cook my-app 12 --profile routine
+bin/ltc-cook my-app 12 --role developer --profile routine
 ```
 
 Replace `12` with the ID returned by task creation. Select `--harness claude` or `--harness pi` as needed. `ltc-cook PROJECT TASK_ID [WORKTREE_NAME] [PROFILE]` also accepts the legacy positional profile. Use either that position or `--profile`. `--config PATH` chooses a [Cook configuration](configuration.md#prompts-and-alternate-configs).
@@ -121,7 +121,7 @@ The snapshot uses the same run scoping as `ltc-status`. It verifies each termina
 
 If the Cook has stopped and the task still needs work, update the brief with what the next session needs. From the verified Chef terminal, in the same registry and recorded Herdr session, run `bin/ltc-resume RUN_ID` using the latest run for that worktree. Keep the previous terminal record available. Resume verifies labels, worktree ownership and a `finished` state before recording a new run in the same worktree. It refuses an unknown or missing terminal, a newer run, or an `HC_SOCKET` override. Check any intentionally detached processes separately.
 
-Newer runs reuse the recorded harness, profile, model and effort even if the profile changes. Null settings use the CLI defaults. Historical Codex-only runs resolve their saved profile against the selected config. Supply the original `--config PATH` if the mapping changed. Every resumed Cook gets the current task brief.
+Newer runs reuse the recorded role, harness, profile, model and effort even if the profile changes. Runs predating roles resume as generic. Null settings use the CLI defaults. Historical Codex-only runs resolve their saved profile against the selected config. Supply the original `--config PATH` if the mapping changed. Every resumed Cook gets the current task brief.
 
 Codex, Pi and legacy Claude runs without a recorded conversation UUID start a fresh conversation. New registered Claude runs get a UUID via `--session-id`. By default resume requests that exact UUID with `claude --resume`. Use `bin/ltc-resume RUN_ID --native` to require native recovery. LTC checks the previous terminal's UUID label and a matching local transcript for the worktree. Use the same `CLAUDE_CONFIG_DIR` as the Cook if configured. Missing, ambiguous or unsupported transcript data blocks native recovery. [Claude Code CLI flags](https://code.claude.com/docs/en/cli-reference) · [Claude Code session storage](https://code.claude.com/docs/en/sessions)
 

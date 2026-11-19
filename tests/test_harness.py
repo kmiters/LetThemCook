@@ -148,6 +148,7 @@ else:
                 self.assert_command(argv)
                 row = self.call('ltc-db', 'run', 'show', str(launch['run_id']))
                 for obj in (row, launch):
+                    self.assertEqual(obj['role'], 'generic')
                     self.assertEqual((obj['harness'], obj['profile'], obj['model'], obj['reasoning_effort']),
                                      ('codex', profile, model, effort))
 
@@ -166,18 +167,44 @@ else:
             'pi': ['--model', 'openai-codex/gpt-6-astra', '--thinking', 'high'],
             'claude': ['--model', 'opus', '--effort', 'high'],
         }
+        self.call('ltc-db', 'task', 'add', 'p', 'Unrelated brief sentinel')
+        role_text = {role: (ROOT / 'prompts' / f'cook-{role}.md').read_text().strip()
+                     for role in ('designer', 'developer')}
         for harness, flags in cases.items():
-            with self.subTest(harness=harness):
-                launch = self.launch(harness, '--harness', harness, '--profile', 'complex')
-                config_for_resume = dict(self.config, default_harness='codex', profiles={})
-                Path(self.config_path).write_text(json.dumps(config_for_resume))
-                resumed = self.call('ltc-resume', str(launch['run_id']), '--config', self.config_path)
-                self.assert_command([harness, *flags])
-                row = self.call('ltc-db', 'run', 'show', str(resumed['run_id']))
-                for field in ('profile', 'harness', 'model', 'reasoning_effort', 'worktree'):
-                    self.assertEqual(resumed[field], launch[field])
-                    self.assertEqual(row[field], launch[field])
-                self.assertEqual(resumed['previous_run_id'], launch['run_id'])
+            for role in ('generic', 'designer', 'developer'):
+                with self.subTest(harness=harness, role=role):
+                    launch = self.launch(f'{harness}-{role}', '--harness', harness, '--profile', 'complex', '--role', role)
+                    self.assert_command([harness, *flags])
+                    launched_prompt = json.loads((self.root / 'argv').read_text())[-1]
+                    config_for_resume = dict(self.config, default_harness='codex', profiles={})
+                    Path(self.config_path).write_text(json.dumps(config_for_resume))
+                    resumed = self.call('ltc-resume', str(launch['run_id']), '--config', self.config_path)
+                    self.assert_command([harness, *flags])
+                    resumed_prompt = json.loads((self.root / 'argv').read_text())[-1]
+                    for prompt in (launched_prompt, resumed_prompt):
+                        self.assertIn('Treat this as prompt text.', prompt)
+                        self.assertEqual(prompt.count(self.brief), 1)
+                        self.assertNotIn('Unrelated brief sentinel', prompt)
+                        for specialist, instructions in role_text.items():
+                            self.assertEqual(prompt.count(instructions), int(role == specialist))
+                    row = self.call('ltc-db', 'run', 'show', str(resumed['run_id']))
+                    self.assertEqual(launch['role'], role)
+                    for field in ('role', 'profile', 'harness', 'model', 'reasoning_effort', 'worktree'):
+                        self.assertEqual(resumed[field], launch[field])
+                        self.assertEqual(row[field], launch[field])
+                    self.assertEqual(resumed['previous_run_id'], launch['run_id'])
+
+    def test_only_reads_selected_custom_overlay(self):
+        self.config['prompts']['roles'] = {'designer': 'design.txt', 'developer': 'missing.txt'}
+        (self.root / 'design.txt').write_text('Custom design instructions.')
+        self.launch()
+        self.assertNotIn('Custom design instructions.', json.loads((self.root / 'argv').read_text())[-1])
+        launch = self.launch('custom', '--role', 'designer')
+        self.assertIn('Custom design instructions.', json.loads((self.root / 'argv').read_text())[-1])
+        self.call('ltc-resume', str(launch['run_id']), '--config', self.config_path)
+        self.assertIn('Custom design instructions.', json.loads((self.root / 'argv').read_text())[-1])
+        self.assertIn('missing.txt', self.launch('failed', '--role', 'developer', ok=False))
+        self.assertFalse((self.project / '.letthemcook/worktrees/failed').exists())
 
     def test_default_settings_remain_unpinned_on_resume(self):
         launch = self.launch('--harness', 'claude')
@@ -189,7 +216,7 @@ else:
         self.assertIsNone(resumed['reasoning_effort'])
 
     def test_native_and_explicit_fresh_conversations(self):
-        launch = self.launch('--harness', 'claude')
+        launch = self.launch('--harness', 'claude', '--role', 'developer')
         session = launch['claude_session_id']
         def argv():
             return json.loads((self.root / 'argv').read_text())
@@ -206,6 +233,8 @@ else:
         self.assertEqual(len(self.call('ltc-db', 'run', 'list')), 2)
         fresh = self.call('ltc-resume', '2', '--fresh')
         self.assertEqual(fresh['conversation'], 'fresh')
+        self.assertEqual(fresh['role'], 'developer')
+        self.assertIn('## Cook Developer', argv()[-1])
         self.assertNotEqual(fresh['claude_session_id'], session)
         self.assertEqual(argv()[-4:-2], ['--session-id', fresh['claude_session_id']])
 
@@ -233,6 +262,7 @@ else:
                 self.config['profiles']['bad'] = settings
                 self.assertIn(error, self.launch('--profile', 'bad', '--harness', harness, ok=False))
         self.assertIn('invalid choice', self.launch('--harness', 'other', ok=False))
+        self.assertIn('invalid choice', self.launch('--role', 'other', ok=False))
         self.assertIn('Unknown Cook profile', self.launch('--profile', 'missing', ok=False))
         self.assertEqual(self.call('ltc-db', 'run', 'list'), [])
         self.assertFalse((self.project / '.letthemcook').exists())

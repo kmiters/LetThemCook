@@ -31,15 +31,17 @@ def ensure_runs(conn):
     for column in ('harness', 'model', 'reasoning_effort', 'claude_session_id'):
         if column not in columns:
             conn.execute(f'ALTER TABLE cook_runs ADD COLUMN {column} TEXT')
+    if 'role' not in columns:
+        conn.execute("ALTER TABLE cook_runs ADD COLUMN role TEXT NOT NULL DEFAULT 'generic'")
     conn.execute('CREATE INDEX IF NOT EXISTS cook_runs_task_id ON cook_runs(task_id, id)')
 
 
-def start_run(conn, task_id, project_id, space, worktree, base, hc_session, name, route, claude_session_id=None):
+def start_run(conn, task_id, project_id, space, worktree, base, hc_session, name, route, claude_session_id=None, *, role='generic'):
     cursor = conn.execute("""INSERT INTO cook_runs
-        (task_id, project_id, space, worktree, base, hc_session, name, profile, harness, model, reasoning_effort, claude_session_id, launch_state)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting')""",
+        (task_id, project_id, space, worktree, base, hc_session, name, profile, harness, model, reasoning_effort, claude_session_id, role, launch_state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting')""",
         (task_id, project_id, space, str(worktree), base, hc_session, name,
-         route.profile, route.harness, route.model, route.reasoning_effort, claude_session_id))
+         route.profile, route.harness, route.model, route.reasoning_effort, claude_session_id, role))
     return cursor.lastrowid
 
 
@@ -101,8 +103,8 @@ def get_brief(conn, task_id):
     return dict(zip(BRIEF_FIELDS, row)) if row else None
 
 
-def cook_reporting_context(db, root):
-    return (f'\nRegistry: {db}\nLetThemCook directory: {root}'
+def cook_reporting_context(db, root, project):
+    return (f'\nProject: {project}\nRegistry: {db}\nLetThemCook directory: {root}'
             '\nSave results, questions and blockers with ltc-report. The Chef reads the project inbox.')
 
 
