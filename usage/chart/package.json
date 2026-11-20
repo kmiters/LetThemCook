@@ -1,0 +1,16 @@
+{
+  "name": "ltc-usage-chart",
+  "private": true,
+  "type": "module",
+  "scripts": {"build": "node build.mjs"},
+  "dependencies": {
+    "clsx": "2.1.1",
+    "motion": "12.23.26",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-is": "19.2.3",
+    "recharts": "3.8.0",
+    "tailwind-merge": "3.4.0"
+  },
+  "devDependencies": {"esbuild": "0.27.2"}
+}
