@@ -4,6 +4,7 @@ from contextlib import closing
 from hashlib import sha256
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import groupby
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,34 @@ LANES = {'todo': 'To do', 'in_progress': 'In progress', 'blocked': 'Blocked',
 STATUS_LABELS = {**LANES, 'cancelled': 'Cancelled'}
 BRIEF = {'intent': 'User request', 'context': 'Context', 'scope': 'Scope',
          'acceptance': 'Acceptance criteria', 'checks': 'Verification'}
+FENCE = re.compile(r' {0,3}(`{3,}|~{3,})(?:[ \t]*([\w.+-]+))?[ \t]*')
+BACKTICKS = re.compile(r'`+')
+LIST_ITEM = re.compile(r'( {0,3}([-+*•]|[0-9]{1,9}[.)])[ \t]+)(\S.*)')
+# Recognize command-shaped lines from old briefs, without treating paths or
+# sentences mentioning a tool as commands.
+LEGACY_COMMAND = re.compile(
+    r'(?:\$[ \t]+)?(?:'
+    r'(?:\./)?bin/ltc(?:-[\w-]+)?(?:[ \t]+.*)?'
+    r'|git[ \t]+(?:status|diff|log|branch)(?:[ \t]+[-./].*)?'
+    r'|git[ \t]+(?:commit|fetch|pull|push|show)(?:[ \t]+\S.*)?'
+    r'|git[ \t]+(?:add|checkout|restore|switch|worktree)[ \t]+\S.*'
+    r'|python3?[ \t]+(?:-m[ \t]+[\w.]+|\S+\.py)(?:[ \t]+.*)?'
+    r'|(?:npm|pnpm|yarn|bun)[ \t]+(?:run[ \t]+\S.*|(?:test|install|start)(?:[ \t]+-.*)?)'
+    r'|(?:cd|ls|cat|curl)[ \t]+(?:[./~-]|https?://)\S.*'
+    r')'
+)
+LEGACY_INLINE_COMMAND = re.compile(
+    r'(?<![\w./~-])(?:git diff --binary HEAD|npm run check)(?![\w/-]|\.\w)'
+)
+SHELL_LANGUAGES = {'sh', 'bash', 'zsh', 'fish', 'shell', 'shellscript'}
+SUBCOMMAND_TOOLS = {'git', 'npm', 'pnpm', 'yarn', 'bun'}
+INLINE_SHELL = re.compile(r'(?:echo|printf|cd|ls|mkdir|grep|curl|pwd|--?[a-zA-Z][\w-]*)(?:[ \t].*)?')
+SHELL_TOKEN = re.compile(
+    r'(?P<comment>(?<![^ \t\n;|&()])#[^\n]*)|'
+    r"""(?P<string>'[^']*'|"(?:\\[\s\S]|[^"\\])*")|"""
+    r'(?P<operator>[|&;<>()]+)|(?P<newline>\n)|'
+    r"""(?P<word>(?:\\[^\n]|[^ \t\r\n'"|&;<>()\\])+)"""
+)
 
 
 def connect(db):
@@ -156,19 +185,145 @@ def board(conn, p, base):
 {empty}<div class="lanes">{''.join(lanes)}</div>''', projects=list_projects(conn), active_href=base)
 
 
+def shell_markup(source):
+    parts = []
+    end = 0
+    command = True
+    subcommand = False
+    for match in SHELL_TOKEN.finditer(source):
+        token = match.group()
+        kind = match.lastgroup
+        parts.append(escape(source[end:match.start()]))
+        if kind == 'word':
+            if token == '$' and command:
+                kind = 'operator'
+            elif token.startswith('-') and len(token) > 1:
+                kind = 'option'
+                command = False
+            elif command or subcommand:
+                kind = 'command'
+                subcommand = command and token in SUBCOMMAND_TOOLS
+                command = False
+        elif kind == 'newline' or (kind == 'operator' and token[0] in ';|&()'):
+            command = True
+            subcommand = False
+
+        literal = escape(token)
+        if kind not in {'word', 'newline'}:
+            literal = f'<span class="syntax-{kind}">{literal}</span>'
+        parts.append(literal)
+        end = match.end()
+    parts.append(escape(source[end:]))
+    return ''.join(parts)
+
+
+def recognized_shell(source):
+    line = source.strip()
+    return LEGACY_COMMAND.fullmatch(line) or INLINE_SHELL.fullmatch(line)
+
+
+def inline_legacy_commands(text):
+    parts = []
+    end = 0
+    for match in LEGACY_INLINE_COMMAND.finditer(text):
+        parts.append(escape(text[end:match.start()]))
+        parts.append(f'<code>{shell_markup(match.group())}</code>')
+        end = match.end()
+    parts.append(escape(text[end:]))
+    return ''.join(parts)
+
+
+def inline_code(line):
+    runs = list(BACKTICKS.finditer(line))
+    next_run = {}
+    closing = {}
+    for run in reversed(runs):
+        ticks = run.group()
+        if ticks in next_run:
+            closing[run.start()] = next_run[ticks]
+        next_run[ticks] = run
+
+    parts = []
+    end = 0
+    for run in runs:
+        close = closing.get(run.start())
+        if run.start() < end or close is None:
+            continue
+        parts.append(inline_legacy_commands(line[end:run.start()]))
+        code = line[run.end():close.start()]
+        parts.append(f'<code>{shell_markup(code) if recognized_shell(code) else escape(code)}</code>')
+        end = close.end()
+    parts.append(inline_legacy_commands(line[end:]))
+    return ''.join(parts)
+
+
+def brief_blocks(value):
+    lines = value.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        if fence := FENCE.fullmatch(line):
+            marker = fence[1]
+            closer = re.compile(rf' {{0,3}}{marker[0]}{{{len(marker)},}}[ \t]*')
+            start = index
+            while index < len(lines) and not closer.fullmatch(lines[index]):
+                index += 1
+            if index == len(lines):
+                # Preserve unfinished fences, including their opening marker.
+                yield 'p', escape('\n'.join(lines[start - 1:]))
+                break
+            code = lines[start:index]
+            language = (fence[2] or '').lower()
+            if language in SHELL_LANGUAGES:
+                markup = shell_markup('\n'.join(code))
+            elif not language:
+                markup = '\n'.join(shell_markup(line) if recognized_shell(line) else escape(line)
+                                   for line in code)
+            else:
+                markup = escape('\n'.join(code))
+            yield 'pre', markup
+            index += 1
+        elif not line.strip():
+            yield '', ''
+        elif item := LIST_ITEM.fullmatch(line):
+            tag = 'ol' if item[2][0].isdigit() else 'ul'
+            yield tag, (f'<li><span>{escape(item[1])}</span>'
+                        f'<span>{inline_code(item[3])}</span></li>')
+        elif LEGACY_COMMAND.fullmatch(line.strip()):
+            yield 'pre', shell_markup(line)
+        else:
+            yield 'p', inline_code(line)
+
+
+def format_brief(value):
+    blocks = []
+    for tag, group in groupby(brief_blocks(value), key=lambda block: block[0]):
+        if tag == 'pre':
+            blocks.extend(f'<pre><code>{code}</code></pre>' for _, code in group)
+        elif tag == 'p':
+            blocks.extend(f'<p>{line}</p>' for _, line in group)
+        elif tag:
+            items = ''.join(item for _, item in group)
+            blocks.append(f'<{tag} role="list">{items}</{tag}>')
+        else:
+            blocks.extend('' for _ in group)
+    return '\n'.join(blocks)
+
+
 def detail(conn, task, project, base):
     brief = get_brief(conn, task['id']) or {}
     fields = [(label, brief.get(key)) for key, label in BRIEF.items()]
     fields.append(('Additional notes', task['description']))
-    sections = ''.join(f'<section><h2>{label}</h2><p>{escape(value)}</p></section>'
+    sections = ''.join(f'<section><h2>{label}</h2>{format_brief(value)}</section>'
                        for label, value in fields if value and value.strip())
     for report in task_reports(conn, project['id'], task['id']):
         url = report['review_url']
         link = f'<p><a href="{escape(url)}">Open review</a></p>' if url and review_url(url) else ''
         sections += (f'<section><h2>Cook report · Run {report["run_id"]}</h2>'
                      f'<small>{escape(report["created_at"])} UTC</small>'
-                     f'<p>{escape(report["outcome"])}</p><h3>Validation</h3>'
-                     f'<p>{escape(report["validation"])}</p>{link}</section>')
+                     f'{format_brief(report["outcome"])}<h3>Validation</h3>'
+                     f'{format_brief(report["validation"])}{link}</section>')
     status = task['status']
     name = escape(project['name'])
     return page(task['title'], f'''<a class="back" href="{base}">← {name} board</a><article class="brief">

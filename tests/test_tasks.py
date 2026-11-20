@@ -167,6 +167,68 @@ class BoardTest(unittest.TestCase):
                 self.assertIn('href="/projects/1/tasks/1"', lane)
                 self.assertEqual(html.count('class="ticket"'), 1)
 
+    def test_task_detail_formats_text_and_keeps_literals_inert(self):
+        intent = (
+            'First paragraph with `<inline-tag>&` and ``a`b``.\n'
+            'A saved line break.\n\n'
+            'git status shows changes in this sentence.\n'
+            '[Literal link](javascript:alert(1)) and /path/to/notes.\n'
+            '- First item with `--flag value`\n'
+            '• Second item\n'
+            '3) Third item\n'
+            '7. Fourth item\n'
+            '  $ git status --short\n'
+            '````sh\n'
+            'printf "<code-tag>&" | grep tag # sample\n\n'
+            '```\n'
+            '  indented argument\n'
+            '````\n'
+            'Trailing <plain-tag> and unmatched `marker.'
+        )
+        notes = ('Single-line plain text with an absolute path /var/tmp/log.\n'
+                 '~~~\nnpm run check\n~~~\n'
+                 '~~~text\nnpm run check\n~~~')
+        context = ('Apply git diff --binary HEAD, then run npm run check.\n'
+                   'Leave `npm run check` alone, plus /npm run check, npm run checker and npm run check.json.')
+        checks = '~~~sh\necho unfinished <unfinished-tag>'
+        self.registry('task', 'add', 'app', 'Formatting', '--intent', intent,
+                      '--context', context, '--checks', checks, '--description', notes)
+        with closing(connect(self.db)) as conn:
+            status, (highlighted, _) = lookup(conn, '/projects/1/tasks/1')
+            self.assertEqual(status, 200)
+            self.assertEqual(conn.execute('SELECT intent FROM task_briefs').fetchone()[0], intent)
+        html = re.sub(r'<span class="syntax-\w+">([^<]*)</span>', r'\1', highlighted)
+        self.assertIn('<p>First paragraph with <code>&lt;inline-tag&gt;&amp;</code> and '
+                      '<code>a`b</code>.</p>\n<p>A saved line break.</p>\n\n<p>git status shows changes', html)
+        self.assertIn('[Literal link](javascript:alert(1)) and /path/to/notes.</p>', html)
+        self.assertNotIn('href="javascript:', html)
+        self.assertIn('<p>Apply <code>git diff --binary HEAD</code>, then run <code>npm run check</code>.</p>\n'
+                      '<p>Leave <code>npm run check</code> alone, plus /npm run check, npm run checker and '
+                      'npm run check.json.</p>', html)
+        self.assertIn('<ul role="list"><li><span>- </span><span>First item with <code>--flag value</code></span></li>'
+                      '<li><span>• </span><span>Second item</span></li></ul>', html)
+        self.assertIn('<ol role="list"><li><span>3) </span><span>Third item</span></li>'
+                      '<li><span>7. </span><span>Fourth item</span></li></ol>', html)
+        self.assertIn('<pre><code>  $ git status --short</code></pre>', html)
+        self.assertIn('<pre><code>printf &quot;&lt;code-tag&gt;&amp;&quot; | grep tag # sample\n\n```\n'
+                      '  indented argument</code></pre>', html)
+        self.assertIn('<p>Trailing &lt;plain-tag&gt; and unmatched `marker.</p>', html)
+        self.assertIn('<p>~~~sh\necho unfinished &lt;unfinished-tag&gt;</p>', html)
+        self.assertIn(f'<p>{notes.splitlines()[0]}</p>', html)
+        self.assertIn('<code><span class="syntax-command">git</span> '
+                      '<span class="syntax-command">diff</span> <span class="syntax-option">--binary</span> HEAD</code>',
+                      highlighted)
+        self.assertIn('<code><span class="syntax-option">--flag</span> value</code>', highlighted)
+        self.assertIn('<span class="syntax-string">&quot;&lt;code-tag&gt;&amp;&quot;</span> '
+                      '<span class="syntax-operator">|</span> <span class="syntax-command">grep</span> tag '
+                      '<span class="syntax-comment"># sample</span>', highlighted)
+        self.assertIn('<pre><code><span class="syntax-command">npm</span> '
+                      '<span class="syntax-command">run</span> check</code></pre>', highlighted)
+        self.assertEqual(highlighted.count('<pre><code>npm run check</code></pre>'), 1)
+        parser = TextParser()
+        parser.feed(highlighted)
+        self.assertTrue({'inline-tag', 'code-tag', 'plain-tag', 'unfinished-tag'}.isdisjoint(parser.tags))
+
     def test_project_navigation_on_overview_board_and_detail(self):
         task = self.registry('task', 'add', 'app', 'A single task')
         task_path = f"/projects/1/tasks/{task['id']}"

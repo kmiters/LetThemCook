@@ -232,11 +232,47 @@ footer {
 .brief-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .brief-meta .eyebrow { color: var(--text-medium); font-size: 0.75rem; }
 .status { padding: 4px 8px; background: var(--background-weak); border-radius: 6px; font-size: 0.75rem; }
-.brief .meta { margin-bottom: 24px; }
-.brief section { border-top: 1px solid var(--border-weak); padding-block: 16px; }
-.brief section:last-child { padding-bottom: 0; }
-.brief section h2 { font: 500 1.125rem/1.4 var(--font-heading); margin: 0; }
-.brief section p { color: var(--text-medium); white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; line-height: 1.6; }
+.brief .meta { margin-bottom: 1.75rem; }
+.brief section + section { margin-top: clamp(1.5rem, 1.2rem + 1vw, 2rem); }
+.brief section h2 { font: 600 1.25rem/1.35 var(--font-heading); margin: 0; }
+.brief section h3 { font: 600 1rem/1.4 var(--font-heading); margin: 1rem 0 0; }
+.brief section :is(p, ul, ol, pre) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0.5rem 0 0;
+}
+.brief section :is(p, ul, ol) {
+  color: var(--text-strong);
+  font-size: clamp(1rem, 0.94rem + 0.26vw, 1.125rem);
+  line-height: 1.65;
+  max-inline-size: 58ch;
+}
+.brief section :is(ul, ol) { list-style: none; padding: 0; }
+.brief section p + p { margin-top: 0.875rem; }
+.brief section li { display: flex; }
+.brief section li + li { margin-top: 0.25rem; }
+.brief section li > :first-child { flex: none; white-space: break-spaces; }
+.brief section li > :last-child { min-width: 0; }
+.brief code {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9375em;
+  color: var(--text-strong);
+  background: var(--background-weak);
+  padding: 0.12em 0.3em;
+  border-radius: 4px;
+}
+.brief pre {
+  font: 1rem/1.55 var(--font-body);
+  background: var(--background-weak);
+  padding: 0.75rem 0.875rem;
+  border-radius: 6px;
+}
+.brief pre code { font-size: inherit; background: transparent; padding: 0; }
+.brief code .syntax-command { color: light-dark(#174ea6, #8ab4ff); }
+.brief code .syntax-option { color: light-dark(#6537a2, #cea6ff); }
+.brief code .syntax-string { color: light-dark(#20633a, #91d5a5); }
+.brief code .syntax-operator { color: light-dark(#85431a, #ffb583); }
+.brief code .syntax-comment { color: var(--text-medium); }
 .notice { color: var(--text-medium); }
 
 @media (max-width: 1100px) {
