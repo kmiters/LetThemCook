@@ -13,8 +13,9 @@ import sys
 from time import monotonic
 import unicodedata
 
+from ltc_registry import has_reports
 from ltc_status import ROOT, current_runs, inspect_terminal, read_project_status, terminal_env
-from ltc_whatsup_summary import SUMMARY_MODELS, render_summary
+from ltc_whatsup_summary import SUMMARY_MODELS, redact_urls, render_summary
 
 try:
     from ltc_workspace import matching_project_ids
@@ -87,7 +88,7 @@ def bounded_read(run):
                 process.kill()
 
 
-def read_screen(run):
+def read_screen(run, *, redact_links=False):
     try:
         data, reason = bounded_read(run)
         if reason:
@@ -98,6 +99,8 @@ def read_screen(run):
             raise ValueError('Screen text is not a string')
         # Keep the excerpt as JSON data even when it contains shell commands or markup.
         text = ''.join(char for char in text if char in '\n\t' or unicodedata.category(char) not in ('Cc', 'Cf')).strip()
+        if redact_links:
+            text = redact_urls(text)
         lines = text.splitlines()
         excerpt = '\n'.join(lines[-MAX_EXCERPT_LINES:])[-MAX_EXCERPT_CHARS:]
         if not excerpt:
@@ -152,10 +155,10 @@ def describe_run(run, task, status, terminal, screen):
     return result
 
 
-def add_screen(run, status, terminal, token):
+def add_screen(run, status, terminal, token, *, redact_links=False):
     if terminal is None:
         return status, None, {'state': 'unavailable', 'reason': status['reason']}
-    screen = read_screen(run)
+    screen = read_screen(run, redact_links=redact_links)
     if screen['state'] == 'available':
         # hc read does not return labels. Discard the excerpt if the same
         # address is no longer verifiable after the read.
@@ -169,7 +172,7 @@ def add_screen(run, status, terminal, token):
     return status, terminal, screen
 
 
-def snapshot(project, tasks, runs, token):
+def snapshot(project, tasks, runs, token, *, redact_links=False):
     tasks_by_id = {task['id']: task for task in tasks}
     terminals = {}
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -179,11 +182,21 @@ def snapshot(project, tasks, runs, token):
         relevant = current_runs(tasks, runs)
 
         def summarize(run):
-            status, terminal, screen = add_screen(run, run['terminal_status'], terminals[run['id']], token)
+            status, terminal, screen = add_screen(run, run['terminal_status'], terminals[run['id']], token,
+                                                  redact_links=redact_links)
             return describe_run(run, tasks_by_id[run['task_id']], status, terminal, screen)
 
         inspected = list(pool.map(summarize, relevant))
     return {'project': dict(project), 'runs': inspected, 'omitted_runs': len(runs) - len(relevant)}
+
+
+def latest_review_urls(conn, project_id):
+    if not has_reports(conn):
+        return {}
+    return dict(conn.execute('''SELECT r.id, p.review_url FROM cook_runs r
+        JOIN tasks t ON t.id=r.task_id AND t.project_id=r.project_id
+        JOIN cook_reports p ON p.id=(SELECT max(id) FROM cook_reports WHERE run_id=r.id)
+        WHERE r.project_id=?''', (project_id,)))
 
 
 def main():
@@ -201,9 +214,14 @@ def main():
         conn.execute('BEGIN')
         project = resolve_project(conn, args.project, Path.cwd())
         tasks, runs, token, _ = read_project_status(conn, project['id'], include_launch_settings=True)
-    report = snapshot(project, tasks, runs, token)
+        urls = latest_review_urls(conn, project['id']) if args.summarize else {}
+        for run in runs:
+            if run.get('_member_mismatch'):
+                urls.pop(run['id'], None)
+    report = snapshot(project, tasks, runs, token, redact_links=bool(args.summarize))
     if args.summarize:
-        print(render_summary(report, args.summarize, args.language, db, ROOT / 'bin' / 'ltc-tasks'))
+        print(render_summary(report, args.summarize, args.language, db, ROOT / 'bin' / 'ltc-tasks',
+                             review_urls=urls))
     else:
         print(json.dumps(report, ensure_ascii=True))
     return 0

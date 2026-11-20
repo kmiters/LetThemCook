@@ -89,7 +89,22 @@ class WhatsupSummaryTest(unittest.TestCase):
         self.assertIn('Requested summarizer: codex / gpt-6-luna / low', markdown)
         self.assertIn('Ship \\[report\\]', markdown)
         self.assertIn('The Cook reported that three tests passed.', markdown)
+        self.assertIn(f'[Task card]({url}/tasks/3)', markdown)
         self.assertEqual(markdown.splitlines()[-1], '[Project kanban](' + url + ')')
+
+    def test_model_links_are_removed_and_external_previews_are_never_probed(self):
+        response = {'runs': [{'id': 9, 'summary': 'Ready. [click](https://fake.invalid/?a=secret) '
+                                                'or www.fake.invalid or //fake.invalid.'}]}
+        url = 'https://preview.example/review?key=secret'
+        with patch.object(summary, 'request_summary', return_value=response):
+            with patch.object(summary, 'board_url', return_value='http://127.0.0.1:30100/projects/7'):
+                with patch.object(summary.subprocess, 'run') as run:
+                    markdown = summary.render_summary(REPORT, 'claude', 'English', REGISTRY, BOARD,
+                                                      review_urls={9: url})
+        run.assert_not_called()
+        self.assertNotIn('fake.invalid', markdown)
+        self.assertNotIn('a=secret', markdown)
+        self.assertIn(f'[Preview (unverified)](<{url}>)', markdown)
 
     def test_failures_keep_verified_state_and_reject_other_project_urls(self):
         failed_model = subprocess.CalledProcessError(1, ['codex'])

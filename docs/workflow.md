@@ -59,7 +59,7 @@ Use `bin/ltc-lavish import my-app REVIEW_ID` to file submitted feedback and `bin
 
 Ask the Chef what is running or blocked. From the LetThemCook checkout, use `bin/ltc-status my-app` for tasks and recorded terminal status, or `bin/ltc-status --all my-app` for full history.
 
-If you've enabled the [optional agent shortcuts](configuration.md#optional-agent-shortcuts), use `$tasks` in Codex or `/orders` in Claude Code to open the board. Use `$whatsup` in Codex or `/whatsup` in Claude Code for summarized progress and a board link. The progress summary sends recent terminal excerpts to the configured model provider. [What the progress helper reads](operations.md#progress-evidence)
+If you've enabled the [optional agent shortcuts](configuration.md#optional-agent-shortcuts), use `$tasks` in Codex or `/orders` in Claude Code to open the board. Use `$whatsup` in Codex or `/whatsup` in Claude Code for summarized progress with reported preview links, task cards where needed, and the project kanban. The progress summary sends URL-redacted terminal excerpts to the configured model provider. [What the progress helper reads](operations.md#progress-evidence)
 
 ## Review and accept the dish
 
