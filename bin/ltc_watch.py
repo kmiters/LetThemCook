@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 
+import ltc_lavish_inbox as lavish_inbox
 from ltc_endpoint import chef_binding, verify_callback
 from ltc_registry import has_reports
 from ltc_status import inspect_run, stale_start
@@ -217,7 +218,13 @@ def read_inbox(conn, project_id, recent):
 
         events = entries('watch_events', 'delivered', ', item.state')
         reports = entries('cook_reports', 'notified', '') if has_reports(conn) else []
-        return {'events': events, 'reports': reports}
+        result = {'events': events, 'reports': reports}
+        if lavish_inbox.has_inbox(conn):
+            address, session, space, _ = binding
+            agent = lavish_inbox.Agent(session, address, space)
+            result['lavish_batches'] = lavish_inbox.pending(conn, project_id, None, agent,
+                                                            all_members=True, offer=not recent)
+        return result
 
 
 if __name__ == '__main__':

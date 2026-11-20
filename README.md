@@ -20,7 +20,7 @@ Here are a few things you can say to your Chef.
 
 Ask the Chef for the project board, or run `bin/ltc-tasks your-project` from your LetThemCook checkout. Open a ticket to see the brief, saved Cook reports, and any review links. For terminal status, run `bin/ltc-status your-project` or ask the Chef for a progress update.
 
-- [Annotate a web preview](docs/workflow.md#annotate-a-web-preview-with-lavish) or [review a saved Cook report](docs/workflow.md#annotate-a-saved-cook-report) and collect Lavish feedback in the chosen backlog.
+- [Review a new HTML artifact](docs/workflow.md#review-a-new-html-artifact), [annotate a web preview](docs/workflow.md#annotate-a-web-preview-with-lavish) or [review a saved Cook report](docs/workflow.md#annotate-a-saved-cook-report) and collect Lavish feedback in the chosen backlog.
 - [Set up a project](docs/setup.md) for requirements, registration, and startup help.
 - [Work with your Chef](docs/workflow.md) for boards, progress, previews, and acceptance.
 - [Configure profiles and workspaces](docs/configuration.md) for agent settings and projects with multiple repositories.

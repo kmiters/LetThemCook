@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Open a web preview or saved Cook report in Lavish and file feedback in its chosen backlog."""
+"""Review an HTML artifact, web preview or Cook report and receive its submitted feedback."""
 import argparse
 from contextlib import closing, contextmanager
 import fcntl
@@ -12,9 +12,12 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+import ltc_lavish_inbox as inbox
+import ltc_lavish_listener as listener
 from ltc_lavish_report import render_report, saved_report
 from ltc_lavish_tools import capture, check_server, decode, free_port, lavish, lavish_env, stop_capture
 from ltc_registry import add_task, ensure_briefs, ensure_runs, review_url
@@ -37,15 +40,24 @@ def setup(conn):
             review TEXT NOT NULL REFERENCES lavish_reviews(id), receipt TEXT NOT NULL,
             task_id INTEGER REFERENCES tasks(id), PRIMARY KEY(review, receipt))''')
 
+        listener.setup_listener(conn)
+        inbox.setup(conn)
+
 
 @contextmanager
-def locked(folder):
+def locked(folder, *, wait=False):
     fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ValueError('Another operation owns this review. Finish that operation first.') from None
+        def acquire():
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                return False
+        if wait:
+            listener.wait_for(acquire, 'the previous review operation to release its lock')
+        elif not acquire():
+            raise ValueError('Another operation owns this review. Finish that operation first.')
         yield fd
     finally:
         os.close(fd)
@@ -70,11 +82,18 @@ def artifact(folder):
 
 def open_review(conn, args, root):
     project, member = owner(conn, args)
+    managed = bool(os.environ.get('HC_TERMINAL_ID')) and not getattr(args, 'foreground', False)
+    agent = inbox.caller(conn, project, member) if managed or args.command == 'html' else None
     report = None
     binaries = ['lavish-axi', 'node']
     if args.command == 'report':
         report = saved_report(conn, project, member, args.task_id, args.report_id)
         source = f"ltc:project/{project}/task/{args.task_id}/run/{report['run_id']}/report/{report['report_id']}"
+    elif args.command == 'html':
+        source_file = Path(args.file).expanduser().resolve(strict=True)
+        if source_file.suffix.lower() not in ('.htm', '.html') or not source_file.is_file():
+            raise ValueError('Select a self-contained HTML file')
+        source = source_file.as_uri()
     else:
         source = args.url
         if not review_url(source) or urlsplit(source).port == 0:
@@ -95,6 +114,8 @@ def open_review(conn, args, root):
         with conn:
             conn.execute('''INSERT INTO lavish_reviews (id, project_id, member_id, source, port, phase)
                             VALUES (?,?,?,?,?,'preparing')''', (review, project, member, source, port))
+            if agent:
+                inbox.bind(conn, review, agent)
         close = [str(Path(__file__).resolve()), '--db', str(Path(args.db).expanduser().resolve()),
                  'end', args.project, review]
         if args.member is not None:
@@ -103,7 +124,10 @@ def open_review(conn, args, root):
         page = artifact(folder)
         page.parent.mkdir()
         try:
-            if report is None:
+            if args.command == 'html':
+                shutil.copyfile(source_file, page)
+                rendered, extent = source, 'html'
+            elif report is None:
                 rendered, extent = capture(folder, page, source)
             else:
                 page.write_text(render_report(report, args.project, args.member), encoding='utf-8')
@@ -126,7 +150,12 @@ def open_review(conn, args, root):
         opened = dict(review=review, url=url, project=args.project, member=args.member, capture=extent)
         if report is not None:
             opened.update(task=args.task_id, run=report['run_id'], report=report['report_id'])
-        return opened
+    args.review = review
+    if agent:
+        opened['receiver'] = arm(conn, args, folder, agent)
+    else:
+        opened['receiver'] = {'state': 'foreground_required'}
+    return opened
 
 
 def preserve_attachments(folder, row, prompts):
@@ -158,7 +187,11 @@ def preserve_attachments(folder, row, prompts):
             item['path'] = str(dest)
 
 
-def collect(conn, row, folder, env, lock_fd):
+class InterruptedPoll(ValueError):
+    """Lavish confirmed a transport failure without delivering a receipt."""
+
+
+def collect(conn, row, folder, env, lock_fd, poll_owner=None):
     review = row['id']
     pending = list(folder.glob('receipt-*.toon'))
     if len(pending) > 1:
@@ -172,18 +205,27 @@ def collect(conn, row, folder, env, lock_fd):
     if not receipt.exists() or not receipt.stat().st_size:
         check_server(env)
         with receipt.open('wb') as spool:
-            os.fsync(lock_fd)  # Make the receipt directory entry durable before consuming feedback.
+            directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
             # Keep the per-review lock in the CLI too if its Python parent exits.
-            result = subprocess.run(['lavish-axi', 'poll', str(artifact(folder)), '--owner', 'ltc-' + review],
+            result = subprocess.run(['lavish-axi', 'poll', str(artifact(folder)), '--owner', poll_owner or 'ltc-' + review],
                                     env=env, stdout=spool, pass_fds=(lock_fd,))
             os.fsync(spool.fileno())
         if result.returncode:
             raw = receipt.read_bytes()
             # Only a structured CLI error or no output proves there is no receipt to apply.
             error = decode(raw) if raw else {}
-            if not raw or ('error' in error and 'session' not in error):
-                receipt.unlink()
-            raise ValueError(f'Lavish poll failed ({result.returncode}): {str(error.get("error", ""))[:300]!r}')
+            if raw and (not isinstance(error, dict) or 'error' not in error or 'session' in error):
+                raise ValueError(f'Unrecognized poll failure. Original output retained in {receipt}')
+            receipt.unlink()
+            message = str(error.get('error', ''))[:300]
+            if error.get('code') == 'SERVER_ERROR' and message in (
+                    'Lavish Editor poll response was interrupted', 'Lavish Editor server connection failed'):
+                raise InterruptedPoll(message)
+            raise ValueError(f'Lavish poll failed ({result.returncode}): {message!r}')
     data = decode(receipt.read_bytes())
     session = data.get('session') if isinstance(data, dict) else None
     if not isinstance(session, dict):
@@ -196,19 +238,21 @@ def collect(conn, row, folder, env, lock_fd):
         raise ValueError(f'Incomplete feedback. Original output retained in {receipt}')
     prompts = data.get('prompts', [])
     failures = data.get('artifact_failures', [])
-    if not isinstance(prompts, list) or not all(isinstance(prompt, dict) for prompt in prompts):
+    if (not isinstance(prompts, list) or not all(isinstance(prompt, dict) for prompt in prompts)
+            or not isinstance(failures, list)):
         raise ValueError(f'Invalid feedback. Original output retained in {receipt}')
     task = None
     terminal = status == 'ended' or session.get('session_ended') is True
     with conn:
-        if prompts:
+        if prompts or failures:
             preserve_attachments(folder, row, prompts)
             evidence = dict(source=row['source'], rendered=row['rendered'], review=review, annotations=prompts)
             if failures:
                 evidence['artifact_failures'] = failures
-            task = add_task(conn, row['project_id'], row['member_id'], 'Review Lavish feedback',
-                            json.dumps(evidence, ensure_ascii=False, indent=2),
+            payload = json.dumps(evidence, ensure_ascii=False, indent=2)
+            task = add_task(conn, row['project_id'], row['member_id'], 'Review Lavish feedback', payload,
                             {'context': 'Submitted reviewer evidence. Triage this batch in its assigned backlog.'})
+            inbox.enqueue(conn, review, task, payload)
         conn.execute('INSERT INTO lavish_imports (review, receipt, task_id) VALUES (?,?,?)',
                      (review, receipt.name, task))
         if terminal:
@@ -220,6 +264,8 @@ def collect(conn, row, folder, env, lock_fd):
 def finish(conn, row, folder, env):
     stop_capture(folder)
     if (folder / 'provider').exists():
+        if row['url'] and provider_owner(row, folder):
+            raise ValueError('A listener is still active on this review server. Retry cleanup after it exits.')
         result = lavish(env, 'stop')
         if result['server']['status'] not in ('stopped', 'not-running'):
             raise ValueError('Lavish server is still running. Retry end to finish cleanup.')
@@ -232,55 +278,247 @@ def finish(conn, row, folder, env):
     phase(conn, row['id'], 'ended')
 
 
-def existing(conn, args, root):
+def review_row(conn, args):
     project, member = owner(conn, args)
-    def load():
-        row = conn.execute('SELECT * FROM lavish_reviews WHERE id=? AND project_id=? AND member_id IS ?',
-                           (args.review, project, member)).fetchone()
-        if not row:
-            raise ValueError('Review not found for this project and member')
-        return row
-    row = load()
-    if not re.fullmatch('[0-9a-f]{32}', row['id']):
-        raise ValueError('Invalid review identity in registry')
+    row = conn.execute('SELECT * FROM lavish_reviews WHERE id=? AND project_id=? AND member_id IS ?',
+                       (args.review, project, member)).fetchone()
+    if not row:
+        raise ValueError('Review not found for this project and member')
+    return row
+
+
+def provider_owner(row, folder):
+    health = check_server(lavish_env(folder, row['port']))
+    if health is None:
+        return None
+    holders = health.get('listeners')
+    if not isinstance(holders, list):
+        raise ValueError('Lavish did not report listener ownership')
+    key = urlsplit(row['url']).path.rsplit('/', 1)[-1]
+    if len(holders) > 1 or any(not isinstance(item, dict) or item.get('key') != key
+                               or not isinstance(item.get('label'), str) or not item['label'] for item in holders):
+        raise ValueError('Unexpected listener on the private review server')
+    return holders[0]['label'] if holders else None
+
+
+def poll_label(job):
+    return 'ltc-' + job['generation']
+
+
+def receiver_status(conn, row, folder):
+    job = listener.current(conn, row)
+    info = listener.terminal(conn, row, job) if job else None
+    state = row['phase']
+    result = {}
+    if job:
+        result.update(session=job['session'], terminal=(info or {}).get('address', job['terminal']),
+                      runtime=(info or {}).get('state', 'missing'), generation=job['generation'])
+        if job['detail']:
+            result['detail'] = job['detail']
+    if state in ('open', 'ending'):
+        holder = provider_owner(row, folder)
+        if holder:
+            result['owner'] = holder
+        if job and info and info['state'] == 'live':
+            state = 'listening' if holder == poll_label(job) else job['state']
+        elif job:
+            state = job['state'] if job['state'] in ('failed', 'launch_error') else 'stopped'
+        else:
+            state = 'foreground_required'
+        if holder and not (job and info and info['state'] == 'live' and holder == poll_label(job)):
+            state = 'foreground' if holder == 'ltc-' + row['id'] else 'other_listener'
+    return dict(state=state, **result)
+
+
+def arm(conn, args, folder, agent=None):
+    row = review_row(conn, args)
+    agent = agent or inbox.caller(conn, row['project_id'], row['member_id'])
+    session = agent.session
+    with locked(folder):
+        row = review_row(conn, args)
+        if conn.execute('SELECT 1 FROM lavish_owners WHERE review=?', (row['id'],)).fetchone():
+            inbox.check_owner(conn, row['id'], agent)
+        if row['phase'] != 'open':
+            raise ValueError('Resume requires an open review. Use end to finish cleanup.')
+        job = listener.current(conn, row)
+        if job and job['session'] != session:
+            raise ValueError('Resume this review in its recorded Herdr session')
+        info = listener.terminal(conn, row, job) if job else None
+        holder = provider_owner(row, folder)
+        if holder and (not info or info['state'] != 'live' or holder != poll_label(job)):
+            raise ValueError('Another listener owns this review. Leave it running.')
+        if not info or info['state'] != 'live':
+            # A surviving poll inherits this lock until its receipt has been written.
+            with locked(artifact(folder).parent):
+                listener.launch(conn, args, row, session, uuid4().hex)
+
+    def ready():
+        row = review_row(conn, args)
+        result = receiver_status(conn, row, folder)
+        if result['state'] in ('listening', 'ended', 'drained'):
+            return result
+        if result['state'] in ('failed', 'launch_error', 'stopped', 'other_listener'):
+            raise ValueError(f'Receiver did not become ready: {result}')
+    return listener.wait_for(ready, 'Lavish to confirm the receiver')
+
+
+def request_end(folder, env):
+    result = lavish(env, 'end', str(artifact(folder)))['session']
+    if result.get('status') != 'ended' or result.get('file') != str(artifact(folder)):
+        raise ValueError('Lavish did not confirm the end of this review')
+
+
+def finalize(conn, row, folder, env):
+    # A receipt can survive the commit marking the final batch drained.
+    for receipt in folder.glob('receipt-*.toon'):
+        if not conn.execute('SELECT 1 FROM lavish_imports WHERE review=? AND receipt=?',
+                            (row['id'], receipt.name)).fetchone():
+            raise ValueError(f'Unfiled receipt retained in {receipt}')
+        receipt.unlink()
+    phase(conn, row['id'], 'cleanup')
+    finish(conn, row, folder, env)
+
+
+def receive(conn, args, folder):
+    row = review_row(conn, args)
+    job = listener.current(conn, row)
+    if (not job or job['generation'] != args.generation or os.environ.get('HC_SOCKET')
+            or job['session'] != (os.environ.get('HC_SESSION') or 'default')):
+        raise ValueError('Receiver generation or Herdr session mismatch')
+    info = listener.terminal(conn, row, job)
+    if not info or info['state'] != 'live' or info['address'] != os.environ.get('HC_TERMINAL_ID'):
+        raise ValueError('Receiver is outside its registered Herdr terminal')
+    env = lavish_env(folder, row['port'])
+    try:
+        # The launcher owns the lifecycle lock until it records the Herdr response.
+        with locked(folder, wait=True):
+            if listener.current(conn, row)['generation'] != args.generation:
+                raise ValueError('Receiver generation has changed')
+            if review_row(conn, args)['phase'] not in ('open', 'ending'):
+                raise ValueError('Review is no longer open')
+        with locked(artifact(folder).parent) as fd:
+            listener.record(conn, job, 'receiving')
+            retries = 0
+            while review_row(conn, args)['phase'] in ('open', 'ending'):
+                try:
+                    result = collect(conn, row, folder, env, fd, poll_label(job))
+                except InterruptedPoll as exc:
+                    if retries >= 3:
+                        raise
+                    listener.record(conn, job, 'reconnecting', str(exc))
+                    time.sleep(2 ** retries)
+                    retries += 1
+                    continue
+                if retries:
+                    listener.record(conn, job, 'receiving')
+                    retries = 0
+                if result['status'] in ('waiting', 'browser_disconnected'):
+                    time.sleep(.5)
+            with locked(folder, wait=True):
+                finalize(conn, row, folder, env)
+        listener.record(conn, job, 'finished')
+        return dict(status='ended')
+    except Exception as exc:
+        listener.record(conn, job, 'failed', str(exc)[:1200])
+        raise
+
+
+def await_exit(conn, row, job):
+    def exited():
+        info = listener.terminal(conn, row, job)
+        return not info or info['state'] == 'finished'
+    listener.wait_for(exited, 'the owned Herdr receiver to exit')
+
+
+def review_folder(root, row):
     folder = root / row['id']
-    if folder.resolve() != folder:
+    if not re.fullmatch('[0-9a-f]{32}', row['id']) or folder.resolve() != folder:
         raise ValueError('Review directory must reside beside the selected registry')
+    return folder
+
+
+def status(conn, args, root):
+    project, member = owner(conn, args)
+    rows = []
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='lavish_reviews'").fetchone():
+        rows = conn.execute('''SELECT * FROM lavish_reviews WHERE project_id=? AND member_id IS ?
+            AND ((? IS NULL AND phase!='ended') OR id=?) ORDER BY rowid''',
+                            (project, member, args.review, args.review)).fetchall()
+    results = []
+    for row in rows:
+        try:
+            receiver = receiver_status(conn, row, review_folder(root, row))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            receiver = dict(state='unverified', detail=str(exc))
+        results.append(dict(review=row['id'], phase=row['phase'], url=row['url'], receiver=receiver,
+                            delivery=inbox.summary(conn, row['id'])))
+    if args.review and not results:
+        raise ValueError('Review not found for this project and member')
+    return results[0] if args.review else results
+
+
+def existing(conn, args, root):
+    if args.command == 'status':
+        return status(conn, args, root)
+    row = review_row(conn, args)
+    folder = review_folder(root, row)
+    if args.command == '_receive':
+        return receive(conn, args, folder)
+    if args.command == 'resume' and row['phase'] == 'open':
+        return dict(review=row['id'], url=row['url'], receiver=arm(conn, args, folder))
+    job = listener.current(conn, row)
+    if conn.execute('SELECT 1 FROM lavish_owners WHERE review=?', (row['id'],)).fetchone():
+        inbox.check_owner(conn, row['id'], inbox.caller(conn, row['project_id'], row['member_id']))
+    elif os.environ.get('HC_TERMINAL_ID') and job:
+        if inbox.caller(conn, row['project_id'], row['member_id']).session != job['session']:
+            raise ValueError('Use the recorded Herdr session to operate this receiver')
     if row['phase'] == 'ended':
+        if job and args.command == 'end':
+            await_exit(conn, row, job)
         return dict(status='ended')
     if not folder.exists() and row['phase'] == 'cleanup':
         phase(conn, row['id'], 'ended')
         return dict(status='ended')
-    with locked(folder) as fd:
-        row = load()
+    if args.command == 'resume':
+        raise ValueError('Review is not open. Run end to finalize it.')
+    with locked(folder):
+        row = review_row(conn, args)
+        job = listener.current(conn, row)
+        info = listener.terminal(conn, row, job) if job else None
+        live = info and info['state'] == 'live'
         env = lavish_env(folder, row['port'])
         if args.command == 'import':
             if row['phase'] in ('ended', 'drained', 'cleanup'):
                 return dict(status='ended')
-            if row['phase'] != 'open':
-                raise ValueError('Review is not open. Run end to finalize it.')
-            return collect(conn, row, folder, env, fd)
-        deliveries = []
+            if row['phase'] != 'open' or live:
+                raise ValueError('Foreground import requires an open review without a running receiver.')
+            with locked(artifact(folder).parent) as consumer:
+                return collect(conn, row, folder, env, consumer)
         if row['phase'] == 'open':
-            result = lavish(env, 'end', str(artifact(folder)))['session']
-            if result.get('status') != 'ended' or result.get('file') != str(artifact(folder)):
-                raise ValueError('Lavish did not confirm the end of this review')
-            phase(conn, row['id'], 'ending')
-        while load()['phase'] == 'ending':
-            delivery = collect(conn, load(), folder, env, fd)
-            deliveries.append(delivery)
-            if delivery['status'] in ('waiting', 'browser_disconnected'):
-                raise ValueError('Lavish has not confirmed final delivery. Retry end.')
-        # A receipt can survive the commit marking the final batch drained.
-        row = load()
-        for receipt in folder.glob('receipt-*.toon'):
-            if not conn.execute('SELECT 1 FROM lavish_imports WHERE review=? AND receipt=?',
-                                (row['id'], receipt.name)).fetchone():
-                raise ValueError(f'Unfiled receipt retained in {receipt}')
-            receipt.unlink()
-        phase(conn, row['id'], 'cleanup')
-        finish(conn, row, folder, env)
-        return dict(status='ended', deliveries=deliveries)
+            holder = provider_owner(row, folder)
+            # If a verified terminal finished first, end can still wake its surviving CLI.
+            # The inherited consumer lock protects that CLI's receipt until stdout closes.
+            if holder and (not info or holder != poll_label(job)):
+                raise ValueError('Another listener owns this review. Leave it running.')
+            request_end(folder, env)
+            with conn:
+                conn.execute("UPDATE lavish_reviews SET phase='ending' WHERE id=? AND phase='open'", (row['id'],))
+        if not live:
+            deliveries = []
+            if row['phase'] in ('open', 'ending'):
+                with locked(artifact(folder).parent, wait=bool(info)) as consumer:
+                    while review_row(conn, args)['phase'] == 'ending':
+                        delivery = collect(conn, row, folder, env, consumer)
+                        deliveries.append(delivery)
+                        if delivery['status'] in ('waiting', 'browser_disconnected'):
+                            raise ValueError('Lavish has not confirmed final delivery. Retry end.')
+            finalize(conn, row, folder, env)
+            return dict(status='ended', deliveries=deliveries)
+    # The receiver owns the receipt. Let end wake its poll and wait outside the lifecycle lock.
+    await_exit(conn, row, job)
+    if review_row(conn, args)['phase'] != 'ended':
+        raise ValueError('Receiver exited before cleanup. Inspect status and retry end.')
+    return dict(status='ended')
 
 
 def main():
@@ -288,26 +526,52 @@ def main():
     parser.add_argument('--db', default=os.environ.get('LTC_DB', ROOT / '.letthemcook/registry.sqlite3'))
     commands = parser.add_subparsers(dest='command', required=True)
     for cmd, help_text in [('open', 'Capture an HTTP(S) page and print the local review link'),
+                           ('html', 'Open a private copy of a self-contained HTML file for agent feedback'),
+                           ('inbox', 'Wait for or list unacknowledged batch IDs for the current agent'),
+                           ('read', 'Read an addressed batch, including after review closure'),
+                           ('ack', 'Acknowledge an addressed batch after reading it'),
                            ('report', 'Open a saved Cook report for a registered project and task'),
                            ('import', 'Wait for and file one submitted batch'),
+                           ('status', 'Inspect the review and its receiver'),
+                           ('resume', 'Start or verify a receiver for this existing review'),
+                           ('_receive', 'Run the registered Herdr receiver'),
                            ('end', 'Close the review, import final feedback and clean up')]:
         sub = commands.add_parser(cmd, help=help_text)
         sub.add_argument('project', help='Registered project name')
         if cmd == 'report':
             sub.add_argument('task_id', type=int)
             sub.add_argument('--report-id', type=int, help='Select a specific report (default: latest for this task)')
+        elif cmd == 'inbox':
+            sub.add_argument('--wait', default=0, type=int, metavar='SECONDS')
+        elif cmd in ('read', 'ack'):
+            sub.add_argument('batch', type=int)
+        elif cmd == 'html':
+            sub.add_argument('file')
+        elif cmd == 'status':
+            sub.add_argument('review', nargs='?', help='Default: all unfinished reviews in this backlog')
         else:
             sub.add_argument('url' if cmd == 'open' else 'review')
+        if cmd in ('open', 'report'):
+            sub.add_argument('--foreground', action='store_true', help='Use explicit foreground imports')
+        if cmd == '_receive':
+            sub.add_argument('--generation', required=True)
         sub.add_argument('--member', help='Required for workspace projects')
     args = parser.parse_args()
     db = Path(args.db).expanduser().resolve()
     os.umask(0o077)
-    with closing(sqlite3.connect(db.as_uri() + '?mode=rw', uri=True, timeout=10)) as conn:
+    mode = 'ro' if args.command == 'status' else 'rw'
+    with closing(sqlite3.connect(db.as_uri() + '?mode=' + mode, uri=True, timeout=10)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys=ON')
-        setup(conn)
+        if args.command != 'status':
+            setup(conn)
         root = db.with_name(db.name + '.lavish')
-        result = open_review(conn, args, root) if args.command in ('open', 'report') else existing(conn, args, root)
+        if args.command in ('open', 'report', 'html'):
+            result = open_review(conn, args, root)
+        elif args.command in ('inbox', 'read', 'ack'):
+            result = inbox.operate(conn, args, *owner(conn, args))
+        else:
+            result = existing(conn, args, root)
         print(json.dumps(result, ensure_ascii=False))
 
 

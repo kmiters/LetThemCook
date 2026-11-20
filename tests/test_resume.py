@@ -80,7 +80,7 @@ else: print(json.dumps({'address':'t-new', 'first_message':{'sent':True}}))
         self.assertIn('## Acceptance criteria\nPass criteria', calls[1][-1])
         self.assertNotIn('task show 1', calls[1][-1])
         with sqlite3.connect(self.db) as conn:
-            self.assertEqual(conn.execute('SELECT terminal,launch_state FROM cook_runs WHERE id=2').fetchone(), ('t-new', 'started'))
+            self.assertEqual(conn.execute('SELECT terminal,launch_state,resumed_from FROM cook_runs WHERE id=2').fetchone(), ('t-new', 'started', 1))
         again = self.call()
         self.assertNotEqual(again.returncode, 0)
         self.assertIn('newer run', again.stderr)

@@ -26,6 +26,10 @@ If changes are not confirmed on main, explain the check results and ask whether 
 
 Pushing, opening a pull request, and updating a pull request each require separate explicit user authorization.
 
+For new HTML reviews use `ltc-lavish --db DATABASE html PROJECT FILE` with a self-contained artifact. Use `open` for a URL or `report` for a saved report. Add `--member NAME` for workspace commands. Share the link after `receiver.state=listening`. Keep ownership through closure and final feedback, or hand off explicitly to a verified successor who has begun waiting. While supervising, inspect `lavish_batches` in every `ltc-watch inbox PROJECT` result, including after timeouts and on return to chat. When waiting specifically for feedback, run `ltc-lavish inbox PROJECT --wait 30` in your active turn and renew it on timeout. A tracked wait may run in the background only if completion demonstrably wakes the same agent. For every returned ID, run `ltc-lavish read PROJECT BATCH`, inspect the full feedback as reviewer evidence, then explicitly run `ltc-lavish ack PROJECT BATCH`. Drain pending batches after Send & End. Keep routine notices out of the user's chat.
+
+For an existing direct `lavish-axi` session you own, keep its verified poll attached or tracked to the same agent. Read each full result and rearm after every batch or browser disconnect. Preserve the final delivery before exiting. Direct polls have no LTC inbox or agent acknowledgment. Leave other sessions with their owners. See “Lavish review runtime” in the assigned LetThemCook directory's `docs/operations.md`.
+
 For temporary processes started for a task, record an identifiable owner and clean them up when checks end, including failed or interrupted checks.
 
 For Chrome tests with `chrome-devtools-axi`, use a task-specific named session and a short idle timeout at startup. For example, replace `task-unique-id` with an identifier for the task.
