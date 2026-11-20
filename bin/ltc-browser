@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Run Chrome DevTools AXI in a named, local headless test session."""
+import argparse
+import os
+import re
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('session', help='Unique name for this test run, reused for stop')
+    parser.add_argument('command')
+    parser.add_argument('args', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    if not re.fullmatch(r'ltc-[A-Za-z0-9_-]{1,60}', args.session):
+        parser.error('session must start with ltc- and contain up to 64 letters, digits, underscores or hyphens')
+
+    local_paths = {'CHROME_DEVTOOLS_AXI_MCP_PATH', 'CHROME_DEVTOOLS_AXI_EXECUTABLE_PATH'}
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith('CHROME_DEVTOOLS_AXI_') or key in local_paths}
+    env.update(CHROME_DEVTOOLS_AXI_SESSION=args.session, CHROME_DEVTOOLS_AXI_HEADED='0',
+               CHROME_DEVTOOLS_AXI_IDLE_TIMEOUT_MS='120000')
+    try:
+        os.execvpe('chrome-devtools-axi', ['chrome-devtools-axi', args.command, *args.args], env)
+    except OSError as error:
+        parser.exit(1, f'ltc-browser: {error}\n')
+
+
+if __name__ == '__main__':
+    main()
