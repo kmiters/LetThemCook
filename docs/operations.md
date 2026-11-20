@@ -101,7 +101,7 @@ Launch and resume pass `hc run --no-notify` while preserving the parent used by 
 
 ## Board service
 
-Run `bin/ltc-tasks --db /absolute/path/to/registry.sqlite3 --no-open -- my-app` to get the actual project URL. Append `/tasks/TASK_ID` with the real task ID for a ticket URL, and verify it before sharing. The board needs an existing registry and serves read-only views on loopback. Other local processes can access it.
+For automated checks, run `bin/ltc-tasks --db /absolute/path/to/registry.sqlite3 --no-open -- my-app` to get the project URL. Append `/tasks/TASK_ID` with the real task ID for a ticket URL, and check it with `curl -fsS URL` before sharing. The board needs an existing registry and serves read-only views on loopback. Other local processes can access it. A user can follow the link or run the board command without `--no-open` to open it in their browser.
 
 The default port is stable for a resolved registry path. If occupied by another service, choose a free `--port NUMBER` and reuse that port for links. The launcher reuses its registry's listener and prints its PID to stderr. The detached listener lasts until stopped or the machine restarts. Run the launcher again to restore the URL at the same port. For an owned foreground listener, start `bin/ltc-tasks --serve my-app` and stop it with Ctrl-C when finished.
 
@@ -129,15 +129,20 @@ A result of `native_requested` confirms Herdr returned a terminal for the reques
 
 ## Temporary processes and review previews
 
-Record an identifiable owner for processes started for the task. Stop owned test processes through their owning tools when checks end, including failed or interrupted checks, and verify they exited. Leave shared and user-owned processes alone. For Chrome tests with `chrome-devtools-axi`, use a unique session name and a short idle timeout.
+Record an identifiable owner for processes started for the task. Stop owned test processes through their owning tools when checks end, including failed or interrupted checks, and verify they exited. Leave shared and user-owned processes alone.
+
+Chef and Cook run all automated browser checks in isolated, local headless sessions. For Chrome, use `bin/ltc-browser` from the assigned LetThemCook directory. It requires `chrome-devtools-axi` on PATH, explicitly selects headless mode and sets a two-minute idle timeout. It ignores inherited AXI session, port, headed, connection, profile and other browser flags. It preserves only the AXI settings that locate trusted local executables, `CHROME_DEVTOOLS_AXI_MCP_PATH` and `CHROME_DEVTOOLS_AXI_EXECUTABLE_PATH`. On macOS, a local Chrome for Testing executable can keep LaunchServices from routing user-clicked links to headless Chrome.
 
 ```sh
-CHROME_DEVTOOLS_AXI_SESSION=my-app-task-12 CHROME_DEVTOOLS_AXI_IDLE_TIMEOUT_MS=120000 \
-  chrome-devtools-axi open URL
-CHROME_DEVTOOLS_AXI_SESSION=my-app-task-12 chrome-devtools-axi stop
+browser_session="ltc-task-12-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+bin/ltc-browser "$browser_session" open URL
+bin/ltc-browser "$browser_session" screenshot "/tmp/$browser_session.png"
+bin/ltc-browser "$browser_session" stop
 ```
 
-Verify the owned browser and helpers exited. Keep the preview server separate, with a recorded owner and stop point. Use a free port when needed. Open the URL and exercise the changed scenario from the review environment. Report the worktree, host and port, review steps and setup, what was verified, and how long the server will be available. Keep the preview running until acceptance or the agreed handoff. Report access changes, then stop the owned server and verify it exited when it is no longer needed.
+Use a fresh name for each test run and reuse it for commands within that run. Stop that session even after failed or interrupted checks and verify its browser and helpers exited. Use `curl -fsS URL` for HTTP-only checks and inspect headless renders or screenshots for visual checks. When preparing links for review, use `bin/ltc-tasks --no-open` for the board and `lavish-axi FILE --no-open` for a Lavish preview. Never open or focus a visible browser while preparing or verifying a preview, including through a graphical tool, `open` or AppleScript. Keep automated checks isolated from user profiles and existing browser sessions. If a check requires live interaction, the Chef gives the user the link and steps to perform in their own browser.
+
+Keep the preview server separate, with a recorded owner and stop point. Use a free port when needed. Exercise the changed scenario headlessly from the review environment. Report the worktree, host and port, review steps and setup, what was verified, and how long the server will be available. Keep the preview running until acceptance or the agreed handoff. Report access changes, then stop the owned server and verify it exited when it is no longer needed.
 
 ## Integration and worktree cleanup
 

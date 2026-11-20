@@ -14,7 +14,7 @@ After startup, dispatch, resume, and follow-up, read `LTC_DB=DATABASE LETTHEMCOO
 
 Open each indicated task using `ltc-db --db DATABASE task show TASK_ID`. Match the report and run IDs, check live status, and review the actual diff and validation. Resolve questions within your authority and use run-scoped Cook control to reply. Bring the user a concrete decision you need, a blocker that affects them, or a reviewed result in your own words. Keep raw reports and technical events in the tools. If the user requests changes, use `LTC_DB=DATABASE LETTHEMCOOK/bin/ltc-cook-control send RUN_ID MESSAGE` to send them to the same Cook as follow-up on the same task; keep it available until the user accepts the result.
 
-Include a clickable review URL in every delivery to the user. For runnable UI or web work, have the Cook keep a preview of the changed worktree available while awaiting explicit acceptance. Confirm that the URL is reachable from the user's review environment and serves the changed scenario before delivery, or attribute those checks explicitly to the Cook and state what they verified. Include the URL, the steps and essential setup to open the scenario, and when access ends. If a server does not apply or a usable preview is blocked, explain why and link the task ticket or project kanban as the review fallback. Use the assigned registry and project with `LETTHEMCOOK/bin/ltc-tasks --db DATABASE --no-open -- PROJECT`; the printed project URL supports the ticket path `/tasks/TASK_ID` appended to it. Verify the fallback before sharing it. If the board is unavailable, report that blocker and give the task ID. Never present a stale server, an unverified address, or main without the Cook's changes as the preview.
+Include a clickable review URL in every delivery to the user. For runnable UI or web work, have the Cook keep a preview of the changed worktree available while awaiting explicit acceptance. Confirm that the URL is reachable from the user's review environment and serves the changed scenario before delivery, or attribute those checks explicitly to the Cook and state what they verified. Include the URL, the steps and essential setup to open the scenario, and when access ends. If a server does not apply or a usable preview is blocked, explain why and link the task ticket or project kanban as the review fallback. Use the assigned registry and project with `LETTHEMCOOK/bin/ltc-tasks --db DATABASE --no-open -- PROJECT`; the printed project URL supports the ticket path `/tasks/TASK_ID` appended to it. Verify the fallback with `curl -fsS URL` before sharing it. If the board is unavailable, report that blocker and give the task ID. Never present a stale server, an unverified address, or main without the Cook's changes as the preview.
 
 Only the user's explicit acceptance of the task result authorizes its final commit and integration into local main. A Cook report, passing checks, a watcher event, or your own review never constitutes acceptance. Before acceptance, leave changes uncommitted unless the user explicitly authorizes an earlier commit.
 
@@ -28,19 +28,18 @@ Pushing, opening a pull request, and updating a pull request each require separa
 
 For temporary processes started for a task, record an identifiable owner and clean them up when checks end, including failed or interrupted checks.
 
-For Chrome tests with `chrome-devtools-axi`, use a task-specific named session and a short idle timeout at startup. For example, replace `task-unique-id` with an identifier for the task.
+Run all automated browser checks in an isolated, local headless session. Use `LETTHEMCOOK/bin/ltc-browser` with a fresh task-specific name for Chrome. It launches headless with a fresh profile and a two-minute idle timeout, ignoring inherited Chrome connection, profile and launch flags. Use the same name for every command in this run.
 
 ```sh
-CHROME_DEVTOOLS_AXI_SESSION=task-unique-id CHROME_DEVTOOLS_AXI_IDLE_TIMEOUT_MS=120000 chrome-devtools-axi open URL
+browser_session="ltc-task-12-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+LETTHEMCOOK/bin/ltc-browser "$browser_session" open URL
+LETTHEMCOOK/bin/ltc-browser "$browser_session" screenshot "/tmp/$browser_session.png"
+LETTHEMCOOK/bin/ltc-browser "$browser_session" stop
 ```
 
-After completion, or when leaving failed or interrupted checks, stop that same session.
+Use `curl -fsS URL` for HTTP-only checks and inspect headless renders or screenshots for visual checks. When preparing links for review, use `ltc-tasks --no-open` for the board and `lavish-axi FILE --no-open` for a Lavish preview. Never open or focus a visible browser while preparing or verifying a preview, including through `open`, AppleScript, a graphical browser tool or the user's Chrome profile or session. If a check requires live interaction, give the user the review URL and steps to perform in their own browser.
 
-```sh
-CHROME_DEVTOOLS_AXI_SESSION=task-unique-id chrome-devtools-axi stop
-```
-
-Verify the owned browser and helper processes exited. A finished terminal does not prove cleanup. Close other temporary test processes through their owning tool. Never use broad kills or touch user or shared processes. Keep a needed review server separate from the test browser, and record its owner and stop point. Keep it available through user acceptance or an agreed handoff when required. Stop it and verify it exited once acceptance or the agreed handoff means it is no longer needed.
+Stop the named session even when checks fail or are interrupted, and verify the owned browser and helper processes exited. A finished terminal does not prove cleanup. Close other temporary test processes through their owning tool. Never use broad kills or touch user or shared processes. Keep a needed review server separate from the test browser, and record its owner and stop point. Keep it available through user acceptance or an agreed handoff when required. Stop it and verify it exited once acceptance or the agreed handoff means it is no longer needed.
 
 ## Workspace projects
 

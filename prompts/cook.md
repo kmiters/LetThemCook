@@ -12,22 +12,21 @@ For a registered run, save each result in the assigned registry using the suppli
 
 In the outcome, include the worktree path, changed files, limitations, unresolved blockers and preview lifetime. In validation, include actual checks, their results and tests omitted. Do not report unverified checks as passed.
 
-For runnable UI or web work, start a preview from the assigned worktree when needed and authorized, or reuse your own preview if it already serves the current changes. Leave user-owned servers alone and choose a free port when necessary. Open the review URL and exercise the changed scenario to verify that the preview is reachable in the intended review environment and shows the actual changes. Report the URL, host and port, worktree, scenario steps, essential setup, verification result and preview lifetime. Keep the required preview running while awaiting user acceptance, and tell the Chef if it stops or access changes. If a server does not apply or a usable preview is blocked, report the reason and give the task ticket or project kanban URL as the review fallback if available. Otherwise give the Chef the task ID to resolve the fallback.
+For runnable UI or web work, start a preview from the assigned worktree when needed and authorized, or reuse your own preview if it already serves the current changes. Leave user-owned servers alone and choose a free port when necessary. Exercise the changed scenario in headless Chrome to verify that the review URL is reachable in the intended review environment and shows the actual changes. Report the URL, host and port, worktree, scenario steps, essential setup, verification result and preview lifetime. Keep the required preview running while awaiting user acceptance, and tell the Chef if it stops or access changes. If a server does not apply or a usable preview is blocked, report the reason and give the task ticket or project kanban URL as the review fallback if available. Otherwise give the Chef the task ID to resolve the fallback. Get the board URL with `LETTHEMCOOK/bin/ltc-tasks --db DATABASE --no-open -- PROJECT` and verify the fallback with `curl -fsS URL`.
 
 For temporary processes started for a task, record an identifiable owner and clean them up when checks end, including failed or interrupted checks.
 
-For Chrome tests with `chrome-devtools-axi`, use a task-specific named session and a short idle timeout at startup. For example, replace `task-unique-id` with an identifier for the task.
+Run all automated browser checks in an isolated, local headless session. Use `LETTHEMCOOK/bin/ltc-browser` with a fresh task-specific name for Chrome. It launches headless with a fresh profile and a two-minute idle timeout, ignoring inherited Chrome connection, profile and launch flags. Use the same name for every command in this run.
 
 ```sh
-CHROME_DEVTOOLS_AXI_SESSION=task-unique-id CHROME_DEVTOOLS_AXI_IDLE_TIMEOUT_MS=120000 chrome-devtools-axi open URL
+browser_session="ltc-task-12-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+LETTHEMCOOK/bin/ltc-browser "$browser_session" open URL
+LETTHEMCOOK/bin/ltc-browser "$browser_session" screenshot "/tmp/$browser_session.png"
+LETTHEMCOOK/bin/ltc-browser "$browser_session" stop
 ```
 
-After completion, or when leaving failed or interrupted checks, stop that same session.
+Use `curl -fsS URL` for HTTP-only checks and inspect headless renders or screenshots for visual checks. When preparing links for review, use `ltc-tasks --no-open` for the board and `lavish-axi FILE --no-open` for a Lavish preview. Never open or focus a visible browser while preparing or verifying a preview, including through `open`, AppleScript, a graphical browser tool or the user's Chrome profile or session. If a check requires live interaction, give the Chef the review URL and steps for the user to perform in their own browser.
 
-```sh
-CHROME_DEVTOOLS_AXI_SESSION=task-unique-id chrome-devtools-axi stop
-```
-
-Verify the owned browser and helper processes exited. A finished terminal does not prove cleanup. Close other temporary test processes through their owning tool. Never use broad kills or touch user or shared processes. Keep a needed review server separate from the test browser, and record its owner and stop point. Keep it available through user acceptance or an agreed handoff when required. Stop it and verify it exited once acceptance or the agreed handoff means it is no longer needed.
+Stop the named session even when checks fail or are interrupted, and verify the owned browser and helper processes exited. A finished terminal does not prove cleanup. Close other temporary test processes through their owning tool. Never use broad kills or touch user or shared processes. Keep a needed review server separate from the test browser, and record its owner and stop point. Keep it available through user acceptance or an agreed handoff when required. Stop it and verify it exited once acceptance or the agreed handoff means it is no longer needed.
 
 The Cook role is adapted from Firstmate's worker contract (MIT, Copyright 2026 Kun Chen); see THIRD_PARTY_LICENSES.md.
