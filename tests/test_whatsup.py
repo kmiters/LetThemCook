@@ -1,15 +1,19 @@
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
+from threading import Thread
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'bin'))
+from ltc_board import BoardServer, database_key
 import ltc_status
 import ltc_whatsup
 
@@ -108,6 +112,94 @@ class WhatsupTest(unittest.TestCase):
     def run_helper(self, *args, cwd=None, check=True):
         return subprocess.run([str(ROOT / 'bin/ltc-whatsup'), *args], cwd=cwd or self.app,
                               env=self.env, capture_output=True, text=True, check=check)
+
+    def serve(self, server):
+        thread = Thread(target=server.serve_forever)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+
+    def test_summary_fallback_probes_only_current_project_previews_and_links_cards(self):
+        requests = []
+
+        class PreviewHandler(BaseHTTPRequestHandler):
+            def do_HEAD(self):
+                requests.append(self.path)
+                if self.path == '/redirect':
+                    self.send_response(302)
+                    self.send_header('Location', '/must-not-follow')
+                else:
+                    self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        preview = ThreadingHTTPServer(('127.0.0.1', 0), PreviewHandler)
+        self.serve(preview)
+        origin = f'http://127.0.0.1:{preview.server_port}'
+        working = origin + '/preview?token=private&mode=review'
+        dead_socket = socket.socket()
+        self.addCleanup(dead_socket.close)
+        dead_socket.bind(('127.0.0.1', 0))
+        dead = f'http://127.0.0.1:{dead_socket.getsockname()[1]}/stopped'
+
+        port = 16000 + int(database_key(self.db)[:8], 16) % 16000
+        self.serve(BoardServer(self.db, port))
+        board = f'http://127.0.0.1:{port}/projects/1'
+
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(ltc_whatsup.latest_review_urls(conn, 1), {})
+            conn.execute('''CREATE TABLE cook_reports (
+                id INTEGER PRIMARY KEY, run_id INTEGER, review_url TEXT,
+                outcome TEXT DEFAULT 'Fixture outcome', validation TEXT DEFAULT 'Fixture validation',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+            conn.executemany('INSERT INTO cook_reports (run_id, review_url) VALUES (?, ?)', [
+                (16, origin + '/old'),
+                (16, working),
+                (4, dead),
+                (15, origin + '/hidden'),
+                (13, origin + '/other-project'),
+                (1, origin + '/superseded'),
+                (1, ''),
+                (2, 'file:///invalid-scheme'),
+                (3, 'https://external.invalid/review?key=secret'),
+                (5, origin + '/redirect'),
+            ])
+        hc = self.root / 'hc'
+        terminal_url = 'https://terminal.invalid/?padding=' + 'x' * 6000 + '&pwd=private'
+        hc.write_text(FAKE_HC.replace(
+            "12 passed.'", f"12 passed. {working} {terminal_url}'"))
+        codex = self.root / 'codex'
+        codex.write_text("#!/bin/sh\ncat > \"$SUMMARY_INPUT\"\nexit 1\n")
+        codex.chmod(0o755)
+        prompt_file = self.root / 'prompt'
+        self.env['SUMMARY_INPUT'] = str(prompt_file)
+        before = self.db.read_bytes()
+
+        markdown = self.run_helper('--summarize', 'codex').stdout
+        updates = {int(line.split(' · run #')[1].split('**')[0]): line
+                   for line in markdown.splitlines() if line.startswith('- **')}
+        self.assertIn('Showing verified status without model synthesis', markdown)
+        self.assertIn(f'[Preview](<{origin}/preview?token=private&amp;mode=review>)', updates[16])
+        self.assertIn(f'Preview unavailable · [Task card]({board}/tasks/3)', updates[4])
+        self.assertIn(f'[Task card]({board}/tasks/1)', updates[1])
+        self.assertIn(f'[Task card]({board}/tasks/1)', updates[2])
+        self.assertIn('[Preview (unverified)](<https://external.invalid/review?key=secret>)', updates[3])
+        self.assertIn(f'[Preview (unverified)](<{origin}/redirect>)', updates[5])
+        self.assertEqual(markdown.splitlines()[-1], f'[Project kanban]({board})')
+        self.assertCountEqual(requests, ['/preview?token=private&mode=review', '/redirect'])
+        for value in ('old', 'stopped', 'hidden', 'other-project', 'superseded', 'invalid-scheme', 'terminal.invalid'):
+            self.assertNotIn('/' + value, markdown)
+        prompt = prompt_file.read_text()
+        for value in ('token=private', 'mode=review', 'pwd=private', 'key=secret', 'terminal.invalid', origin):
+            self.assertNotIn(value, prompt)
+        self.assertIn('12 passed.', prompt)
+        self.assertEqual(before, self.db.read_bytes())
+        curl = ['curl', '-q', '--noproxy', '*', '--max-time', '2', '-fsS', '-o', os.devnull]
+        for path in ('', '/tasks/1', '/tasks/3'):
+            subprocess.run([*curl, board + path], check=True)
 
     def test_project_scoped_snapshot_uses_verified_terminal_evidence(self):
         raw = self.run_helper().stdout

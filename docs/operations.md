@@ -118,6 +118,8 @@ bin/ltc-whatsup --summarize claude -- my-app
 
 The first command prints read-only JSON. The others send bounded excerpts to the selected CLI's configured provider for a one-shot summary. Codex requests `gpt-6-luna` at low effort. Claude Code requests `haiku`, and the Claude skill also requests that alias for its invoking turn. Failed synthesis falls back to verified status with an explanation. The summary includes the board link when available, starting or reusing the board without opening a browser.
 
+Each visible run uses its latest saved report from that project for the preview link. The helper checks HTTP(S) previews on localhost, 127.0.0.1, and ::1 with a one-second HEAD request and labels successful 2xx responses as previews. Redirects and endpoints without HEAD support appear as unverified, as do external links, which are displayed without making a request. When the preview is unavailable, unverified, or missing, the update also links to the task card if the board is available. Preview links and task cards remain available in the synthesis fallback. The model receives URL-redacted evidence and never receives the saved review links from the registry.
+
 The snapshot uses the same run scoping as `ltc-status`. It verifies each terminal identity before and after reading, requests up to 24 lines of history plus the visible screen, and caps the returned excerpt at 45 lines and 5,000 characters. The read budget is five seconds and 256 KiB. A report or blocker outside that excerpt can be missing. An idle agent may have a response ready. Inspect the ticket and worktree before drawing conclusions.
 
 ## Resume a Cook
