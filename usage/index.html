@@ -11,24 +11,21 @@
 <body>
   <header><strong>LetThemCook</strong></header>
   <main>
-    <h1>Koszt i zużycie tokenów</h1>
     <p id="status" role="status">Odczytywanie lokalnych liczników…</p>
     <div id="dashboard" hidden>
-      <section class="summary" aria-label="Porównanie średnich">
-        <div><h2 id="avg-label">Szacowany koszt dzienny</h2><strong id="average"></strong><p id="current-period"></p></div>
-        <div class="trend"><h2 id="trend-label">Zmiana średniej</h2><strong id="change"></strong><p id="comparison"></p></div>
-        <p id="coverage"></p>
-      </section>
-      <div class="controls">
-        <label>Źródło i model <select id="filter"></select></label>
-        <label>Zakres (dni) <select id="range"><option value="compare">Z porównaniem</option><option value="30">30</option><option value="90">90</option><option value="all">Cała historia</option></select></label>
-        <details class="advanced"><summary>Ustawienia średniej i tokenów</summary><div>
-        <label>Metryka <select id="metric"><option value="cost">Koszt API Standard · USD</option><option value="all">Wszystkie tokeny</option><option value="fresh">Świeże wejście</option><option value="read">Odczyt cache</option><option value="write">Zapis cache</option><option value="output">Wyjście</option></select></label>
-        <label><span>Okres średniej (pełne dni)<span id="auto-length"></span></span> <select id="period"><option value="auto">Automatycznie</option><option value="1">1</option><option value="7">7</option><option value="14">14</option><option value="30">30</option></select></label>
-        </div></details>
+      <div class="page-head">
+        <h1>Koszt i zużycie tokenów</h1>
+        <div class="controls">
+          <label>Źródło i model <select id="filter"></select></label>
+          <label>Okres <select id="period"><option value="day">Dzień</option><option value="week" selected>Tydzień</option><option value="month">Miesiąc</option><option value="quarter">Kwartał</option><option value="year">Rok</option><option value="ytd">Rok do dziś</option></select></label>
+        </div>
       </div>
+      <section class="summary" aria-label="Zużycie w wybranym okresie">
+        <div><h2>Szacowane zużycie · USD</h2><strong id="average"></strong><p id="current-period"></p></div>
+        <p id="pricing-status"></p>
+      </section>
       <section aria-labelledby="history-heading">
-        <div class="section-head"><h2 id="history-heading">Historia dzienna</h2><span id="dates"></span></div>
+        <div class="section-head"><h2 id="history-heading">Historia</h2></div>
         <div class="legend"><span class="token-key" id="tokens-label">Tokeny łącznie</span><span class="cost-key">Szacowany koszt · USD</span></div>
         <div id="plot"></div>
         <div class="day-strip"><label>Dzień <select id="day" class="value" aria-label="Wybierz dzień"></select></label>
@@ -37,14 +34,14 @@
         </div>
       </section>
       <section aria-labelledby="models-heading">
-        <div class="section-head"><h2 id="models-heading">Modele</h2></div>
+        <div class="section-head"><h2 id="models-heading">Rozbicie na modele</h2></div>
         <div id="models"></div>
       </section>
       <details class="notes"><summary>Źródła danych i zasady wyceny</summary>
         <p id="sources"></p>
-        <p>Panel sumuje tokeny zapisane na tym urządzeniu. Dni bez zdarzeń od początku dostępnej historii mają wartość <span class="value">0</span>. Porównanie obu źródeł zaczyna się od późniejszej z ich pierwszych obserwacji. Usunięte logi, inne urządzenia i wywołania bez liczników mogą zaniżać wyniki.</p>
+        <p>Panel sumuje tokeny zapisane na tym urządzeniu. Dni bez zdarzeń od początku dostępnej historii wybranego źródła mają wartość <span class="value">0</span>. Usunięte logi, inne urządzenia i wywołania bez liczników mogą zaniżać wyniki.</p>
         <p id="pricing-note"></p>
-        <p>Szacunek historyczny według cen API Standard w USD. Rachunki, kredyty planów, podatki, narzędzia i inne taryfy rozlicza dostawca. Progi długości dotyczą pojedynczego żądania. Wyjście zawiera rozumowanie.</p>
+        <p>Koszt jest szacunkiem według cennika API Standard; tokeny bez znanej stawki pozostają poza sumą.</p>
         <p>Rozbicie zapisów Claude według czasu przechowywania pochodzi z logów. Dla zapisów bez tej informacji przyjmujemy <span class="value">5</span> min w Claude i <span class="value">30</span> min w OpenAI. Modele bez stawki i przyrosty bez granicy żądania pozostają poza wyceną.</p>
         <p>Oficjalne stawki · <a href="https://developers.openai.com/api/docs/pricing" rel="noreferrer">OpenAI</a> · <a href="https://platform.claude.com/docs/en/about-claude/pricing" rel="noreferrer">Claude</a></p>
       </details>
