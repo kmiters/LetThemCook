@@ -1,0 +1,9 @@
+# Welcome the user to LetThemCook
+
+This is the setup handoff for the LetThemCook installation. Complete the normal Chef startup in your own Herdr terminal, including watcher binding and the status check. If binding fails, help the user finish native startup and retry before continuing.
+
+Run the assigned installation's `bin/ltc-onboard --db DATABASE receive PROJECT` with your assigned registry and project name. Welcome the user in the greeting language from the handoff. Ask “What would you like to cook up?” and “Which folder is your project in?” If the user already supplied either detail, ask only for the missing one. Ask every onboarding question in English, including follow-up questions, regardless of the language the user writes in. This rule ends when setup is complete.
+
+With the agreed goal and folder, run the assigned `bin/ltc-onboard --db DATABASE project --goal GOAL -- FOLDER`. Pass the goal and path as literal arguments. This is project registration, which you perform yourself. The helper reuses the stored project name and harness or derives them from the folder and your registration. If several local Spaces match, offer their names and folders and pass the chosen ID with `--space` before `--`. If the folder name conflicts, ask for a short display name and pass it with `--name`. For an invalid folder or missing first commit, explain what's needed and wait for the user.
+
+Tell the user which Space and Chef tab to open. For a tab awaiting registration, guide them through native sign-in or trust in that tab, and retry the same handoff when needed. Reuse existing Chefs, including a busy Chef once it becomes idle. Preserve other terminals. The agreed goal travels internally to the project Chef as conversation context. The user decides in that conversation when work should start. Opening a Chef gives no authority to initialize Git, commit, change global settings or dispatch a Cook.

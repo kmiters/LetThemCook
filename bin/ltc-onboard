@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Connect a checkout and hand its first conversation to its own Chef."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import sys
+
+from ltc_endpoint import chef_binding, verify_callback, verify_live_binding
+from ltc_registry import connect
+from ltc_workspace import git_paths
+
+ROOT = Path(__file__).resolve().parents[1]
+BIN = ROOT / 'bin'
+
+
+def run(*argv):
+    result = subprocess.run(argv, text=True, capture_output=True, timeout=30)
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise ValueError(f'{Path(argv[0]).name}: {detail or "command failed"}')
+    return result.stdout
+
+
+def checkout(folder):
+    if not folder.strip():
+        raise ValueError('Choose a project folder.')
+    path = Path(folder).expanduser().resolve()
+    identity = git_paths(path)
+    if not identity or identity[0] != path:
+        raise ValueError('Choose the top folder of an existing Git project.')
+    if subprocess.run(['git', '-C', str(path), 'rev-parse', '--verify', 'HEAD^{commit}'],
+                      capture_output=True).returncode:
+        raise ValueError('This folder needs its first Git commit. Choose a committed project or return after making the commit.')
+    return path
+
+
+def select_space(spaces, projects, project, path, label, choice):
+    local = [s for s in spaces if not s.get('machine')]
+    if project and project['space']:
+        for space in local:
+            if space['id'] == project['space']:
+                return space
+        raise ValueError('Reopen the registered local Space in Herdr Desktop and retry setup.')
+    used = {p['space'] for p in projects}
+    available = [s for s in local if s['id'] not in used and
+                 not any((t.get('name') or '').startswith(('Chef @ ', '👨‍🍳 Chef @ ')) for t in s['tabs'])]
+    matches = [s for s in available if s.get('folder') and Path(s['folder']).expanduser().resolve() == path]
+    if not matches:
+        matches = [s for s in available if not s.get('folder') and s.get('name') in (label, path.name)]
+    if choice:
+        matches = [s for s in matches if s['id'] == choice]
+        if not matches:
+            raise ValueError('The chosen local Space is no longer available. Retry to see the current choices.')
+    if len(matches) > 1:
+        choices = [{k: s.get(k) for k in ('id', 'name', 'folder')} for s in matches]
+        raise ValueError('Choose among the matching local Spaces: ' + json.dumps(choices, ensure_ascii=False))
+    if matches:
+        return matches[0]
+    run('herdr-app', 'do', 'space.new', '--name', label, '--folder', str(path), '--focus', 'false')
+    # A lost response can be retried by matching the new Space's canonical folder.
+    created = [s for s in list_spaces() if not s.get('machine') and s.get('folder')
+               and Path(s['folder']).expanduser().resolve() == path and s['id'] not in {old['id'] for old in spaces}]
+    if len(created) != 1:
+        raise ValueError('Could not identify the newly opened Space. Retry setup to inspect it.')
+    return created[0]
+
+
+def list_spaces():
+    try:
+        return json.loads(run('herdr-app', 'ls'))['spaces']
+    except (ValueError, KeyError, subprocess.TimeoutExpired) as error:
+        raise ValueError(f'Open Herdr Desktop on this computer, then retry setup. {error}') from error
+
+
+def save_handoff(conn, pid, goal, language):
+    conn.execute('''CREATE TABLE IF NOT EXISTS onboarding_handoffs (
+        project_id INTEGER PRIMARY KEY REFERENCES projects(id), goal TEXT NOT NULL,
+        language TEXT, received INTEGER NOT NULL DEFAULT 0, notified TEXT)''')
+    row = conn.execute('SELECT goal, received FROM onboarding_handoffs WHERE project_id=?', (pid,)).fetchone()
+    if row and row[0] != goal and not row[1]:
+        raise ValueError('A different goal is waiting for this project Chef. Finish that handoff first.')
+    conn.execute('''INSERT INTO onboarding_handoffs(project_id,goal,language) VALUES (?,?,?)
+        ON CONFLICT(project_id) DO UPDATE SET goal=excluded.goal,language=excluded.language,received=0,notified=NULL
+        WHERE goal != excluded.goal''', (pid, goal, language))
+    conn.commit()
+
+
+def receive(conn, name):
+    row = conn.execute('SELECT id,path FROM projects WHERE name=?', (name,)).fetchone()
+    if not row:
+        raise ValueError('Project is not registered here.')
+    binding = verify_callback(conn, row[0], os.environ.get('HC_TERMINAL_ID'))
+    conn.execute('BEGIN IMMEDIATE')
+    if chef_binding(conn, row[0]) != binding:
+        raise ValueError('Chef binding changed. Retry from the current Chef.')
+    handoff = conn.execute('SELECT goal,language FROM onboarding_handoffs WHERE project_id=?', (row[0],)).fetchone()
+    if not handoff:
+        raise ValueError('No setup handoff for this project.')
+    conn.execute('UPDATE onboarding_handoffs SET received=1 WHERE project_id=?', (row[0],))
+    if Path(row[1]) == ROOT:
+        return {'greeting_language': handoff[1], 'question_language': 'English',
+                'next': 'Ask for the goal and project folder.'}
+    return {'goal': handoff[0]}
+
+
+def deliver(conn, db, project, space, installation):
+    pid, name = project['id'], project['name']
+    try:
+        binding = chef_binding(conn, pid)
+    except ValueError:
+        binding = None
+    live = None
+    if binding:
+        try:
+            live = verify_live_binding(pid, binding)
+        except (ValueError, OSError, subprocess.SubprocessError):
+            pass
+    bound_tab = next((t for t in space['tabs'] if binding and any(
+        item.get('terminal') == binding[0] for item in t.get('terminals', []))), None)
+    result = {'project': name, 'folder': project['path'], 'space': space.get('name') or space['id']}
+    if live or bound_tab:
+        result['tab'] = bound_tab['name'] if bound_tab else binding[0]
+    else:
+        launch, = json.loads(run(BIN / 'ltc-chef', '--db', str(db), '--onboarding', '--', name))
+        if launch['status'] == 'started':
+            new_tab = launch['result'].get('tab')
+            conn.execute('UPDATE onboarding_handoffs SET notified=? WHERE project_id=?', (new_tab, pid))
+            result['tab'] = '👨‍🍳 Chef @ ' + ('Let Them Cook' if installation else name)
+        else:
+            tab = next((t for t in space['tabs'] if t['id'] in launch['tabs']), None)
+            result['tab'] = tab['name'] if tab else launch['tabs'][0]
+    if not live:
+        return dict(result, status='awaiting_registration',
+                    next='Open the Chef tab. Complete native sign-in or workspace trust there if asked. Retry setup to check the binding.')
+    result['status'] = 'bound'
+    received, notified = conn.execute('SELECT received,notified FROM onboarding_handoffs WHERE project_id=?', (pid,)).fetchone()
+    target = bound_tab['id'] if bound_tab else binding[0]
+    if received or notified == target:
+        return dict(result, next='Continue the conversation with this Chef.')
+    # Older or manually launched Chefs have no onboarding prompt. Wake only an idle, verified Chef.
+    command = shlex.join([str(BIN / 'ltc-onboard'), '--db', str(db), 'receive', '--', name])
+    instruction = (f'Read {ROOT / "prompts/onboarding-root.md"} and guide the user through setup.'
+                   if installation else 'Greet the user with the saved goal and ask whether to begin before doing any work.')
+    message = f'Continue the requested LetThemCook setup. From your bound terminal run {command}. {instruction}'
+    try:
+        subprocess.run(['hc', 'send', '--if', 'idle', binding[0], message], check=True, timeout=5,
+                       capture_output=True, env=dict(os.environ, HC_SESSION=binding[1]))
+    except (subprocess.SubprocessError, OSError):
+        return dict(result, next='The handoff is saved. Retry setup when the Chef is idle to deliver it.')
+    conn.execute('UPDATE onboarding_handoffs SET notified=? WHERE project_id=?', (target, pid))
+    return dict(result, next='Continue the conversation with this Chef.')
+
+
+def setup(args, db):
+    installation = args.action == 'root'
+    for executable in ('git', 'bash', 'herdr-app', 'hc'):
+        if not shutil.which(executable):
+            raise ValueError(f'Missing command: {executable}. Install it or make it available in this terminal, then retry.')
+    if os.environ.get('HC_SOCKET'):
+        raise ValueError('Use the local Herdr connection without an HC_SOCKET override.')
+    path = checkout(str(ROOT) if installation else args.folder)
+    if not installation and path == ROOT:
+        raise ValueError('Choose the project you want to work on. This folder already hosts the setup Chef.')
+    registry = [BIN / 'ltc-db', '--db', str(db), 'project']
+    projects = json.loads(run(*registry, 'list'))
+    root_project = next((p for p in projects if Path(p['path']) == ROOT), None)
+    project = next((p for p in projects if Path(p['path']) == path), None)
+    if not installation:
+        if not root_project:
+            raise ValueError('Start setup in the LetThemCook checkout first.')
+        with connect(db) as conn:
+            verify_callback(conn, root_project['id'], os.environ.get('HC_TERMINAL_ID'))
+            if conn.execute('SELECT 1 FROM project_members WHERE common_dir=?', (str(git_paths(path)[1]),)).fetchone():
+                raise ValueError('This checkout belongs to a registered workspace. Open its workspace Chef.')
+    name = project['name'] if project else ('LetThemCook' if installation else (args.name or path.name).strip())
+    if not name:
+        raise ValueError('Choose a short project name and retry with --name.')
+    if any(p['name'] == name and Path(p['path']) != path for p in projects):
+        raise ValueError('This registry already has that name for another folder. '
+                         + ('Check the installation and LTC_DB.' if installation else 'Choose a project name and retry with --name.'))
+    harness = project['chef_harness'] if project else (args.harness if installation else root_project['chef_harness'])
+    if not shutil.which(harness):
+        raise ValueError(f'Missing command: {harness}. Make the selected Chef CLI available and retry.')
+    run(*(['codex', '--no-daemon', '--approve-for-me', '--version'] if harness == 'codex' else ['claude', '--version']))
+    space = select_space(list_spaces(), projects, project, path, 'Let Them Cook' if installation else name, args.space)
+    if not project:
+        project = json.loads(run(*registry, 'add', '--space', space['id'], '--chef-harness', harness, '--', name, str(path)))
+    elif not project['space']:
+        project = json.loads(run(*registry, 'update', '--space', space['id'], '--', name))
+    with connect(db) as conn:
+        save_handoff(conn, project['id'], '' if installation else args.goal, args.language if installation else None)
+        return deliver(conn, db, project, space, installation)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--db', default=os.environ.get('LTC_DB', ROOT / '.letthemcook/registry.sqlite3'))
+    sub = parser.add_subparsers(dest='action', required=True)
+    root = sub.add_parser('root')
+    root.add_argument('--harness', required=True, choices=('claude', 'codex'))
+    root.add_argument('--language', help='Greeting language for the setup Chef')
+    project = sub.add_parser('project')
+    project.add_argument('folder')
+    project.add_argument('--name')
+    project.add_argument('--goal', required=True)
+    for command in (root, project):
+        command.add_argument('--space', help='Resolve an ambiguous local Space using a returned ID')
+    sub.add_parser('receive').add_argument('project')
+    args = parser.parse_args()
+    db = Path(args.db).expanduser().resolve()
+    if args.action == 'receive':
+        with connect(db) as conn:
+            return receive(conn, args.project)
+    if args.action == 'project' and not args.goal.strip():
+        parser.error('Ask what the user wants to make before registering their project.')
+    db.parent.mkdir(parents=True, exist_ok=True)
+    # Serialize discovery, Space creation, registration and notification across setup retries.
+    with db.with_name(db.name + '.onboarding.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return setup(args, db)
+
+
+if __name__ == '__main__':
+    try:
+        print(json.dumps(main(), ensure_ascii=False))
+    except (ValueError, OSError, sqlite3.Error, subprocess.SubprocessError) as error:
+        sys.exit(f'ltc-onboard: {error}')

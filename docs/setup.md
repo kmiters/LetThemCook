@@ -14,15 +14,29 @@ LTC passes `--approve-for-me` to Codex Chefs and Cooks. Claude Code and Pi start
 
 The LetThemCook repository is private. Use a GitHub account with repository access and authenticate Git for the HTTPS clone below. If you already have a checkout, start from its root. [GitHub cloning guide](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository)
 
-In Herdr Desktop, create a local Space or select an existing one for the project. Leave it open while you look up its ID.
+Open Herdr Desktop and start your usual agent from the LetThemCook checkout with one short message.
 
 ```sh
 git clone https://github.com/kmiters/LetThemCook.git
 cd LetThemCook
-herdr-app ls
+codex "Set up LetThemCook"
 ```
 
-Copy the Space ID from the output and replace the example checkout path and `SPACE_ID`. Use a short name such as `my-app` for later board and status commands.
+For Claude Code, run `claude "Set up LetThemCook"` after changing folders. Complete any sign-in in the CLI and review the checkout path before trusting the folder. If the CLI opens an empty chat after sign-in, say “Set up LetThemCook”. The same message works in an existing conversation in this checkout. Starting either CLI without a message opens its usual conversation.
+
+Your agent opens **Chef @ Let Them Cook** in Herdr. Open that tab and complete any native sign-in or folder trust prompt yourself. Once connected, the Chef asks “What would you like to cook up?” and “Which folder is your project in?” It asks follow-up questions in English too. You can answer in your own language. Give it your goal and the path to an existing Git checkout with a first commit. It finds or opens a local Space and tells you which project Chef tab to open. Your goal travels with the handoff. The project Chef asks whether to begin.
+
+If setup stops partway through, return to the conversation that opened the tab and ask it to retry. Existing registrations and tabs can be reused, including a tab named **Chef @ LetThemCook** from an earlier installation. A tab that's waiting for trust or login becomes ready only after its Chef registers in Herdr.
+
+### For the agent running setup
+
+From this checkout, run `bin/ltc-onboard root --harness codex` or `bin/ltc-onboard root --harness claude`, using the current CLI unless the user chose another. Pass the conversation language with `--language` (for example, `--language Polish`) for the root Chef’s greeting. Use this installation’s default registry or the configured `LTC_DB`. The helper checks the checkout, first commit, local Herdr window and CLI, and registers this installation. Python 3, Git, Bash, Herdr Desktop and its `hc` CLI must be available. If a dependency is missing, explain the specific next step and resume after it is available. Keep sign-in, trust and global settings under the user's control.
+
+Use the returned Space and tab names in the user's language. On `awaiting_registration`, direct them to the tab for startup and any native prompts. On `bound`, relay the handoff status. For ambiguous Spaces, offer their friendly names and folders, then use the selected ID internally with `--space`. The separate root Chef collects the goal and project folder after it binds. Leave watcher binding to that Chef. Setup authorizes local registration and launch only. Git initialization, commits, global configuration changes and Cook dispatch each need their own user request.
+
+### Manual registration
+
+If you already manage Spaces yourself, open the project’s local Space in Herdr Desktop and run `herdr-app ls`. Copy its Space ID and replace the example checkout path and `SPACE_ID`. Use a short name such as `my-app` for later board and status commands.
 
 ```sh
 bin/ltc-project my-app /absolute/path/to/my-app SPACE_ID
