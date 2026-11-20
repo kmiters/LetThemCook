@@ -18,12 +18,17 @@ ROUTES = {'/': ('index.html', 'text/html'), '/usage.css': ('usage.css', 'text/cs
           '/usage.js': ('usage.js', 'text/javascript'), '/usage-chart.js': ('usage-chart.js', 'text/javascript'),
           '/fonts/InterVariable.woff2': ('fonts/InterVariable.woff2', 'font/woff2'),
           '/chart-LICENSES.txt': ('chart-LICENSES.txt', 'text/plain'),
-          '/marks/openai.svg': ('marks/openai.svg', 'image/svg+xml'), '/marks/claude.svg': ('marks/claude.svg', 'image/svg+xml')}
+          '/marks/openai.svg': ('marks/openai.svg', 'image/svg+xml'), '/marks/claude.svg': ('marks/claude.svg', 'image/svg+xml'),
+          '/brand/let-them-cook-light.png': ('../brand/let-them-cook-light.png', 'image/png'),
+          '/brand/let-them-cook-dark.png': ('../brand/let-them-cook-dark.png', 'image/png')}
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+    def do_HEAD(self):
+        self.do_GET()
 
     def do_GET(self):
         if self.headers.get_all('Host') != [f'127.0.0.1:{self.server.server_port}']:
@@ -52,7 +57,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Content-Security-Policy', "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != 'HEAD':
+            self.wfile.write(body)
 
 
 def listener(port, identity):

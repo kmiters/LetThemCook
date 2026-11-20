@@ -60,6 +60,15 @@ a:focus-visible { outline: 2px solid var(--border-info); outline-offset: 3px; }
   background: var(--border-weak);
 }
 
+.view-nav .brand-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.brand-mark { display: inline-flex; flex: none; width: 20px; height: 20px; }
+.brand-mark img { display: block; width: 100%; height: 100%; object-fit: contain; }
+
 .view-nav .view-task { color: var(--text-weak); }
 
 .view-nav a:hover, .view-nav [aria-current] { color: var(--text-strong); }
