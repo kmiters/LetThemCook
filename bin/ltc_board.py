@@ -114,7 +114,11 @@ def project_navigation(projects, active_href, task_id):
     items = []
     for href, label in links:
         selected = f' aria-current="{current}"' if href == active_href else ''
-        items.append(f'<a href="{href}"{selected}>{escape(label)}</a>')
+        brand = ('<picture class="brand-mark"><source media="(prefers-color-scheme: dark)" '
+                 'srcset="/brand/let-them-cook-dark.png"><img src="/brand/let-them-cook-light.png" '
+                 'width="20" height="20" alt=""></picture>') if label == 'LetThemCook' else ''
+        brand_class = ' class="brand-link"' if brand else ''
+        items.append(f'<a href="{href}"{brand_class}{selected}>{brand}{escape(label)}</a>')
     if task_id is not None:
         items.append(f'<span class="view-task">#{task_id}</span>')
     return ''.join(items)
@@ -368,6 +372,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ('/board.css', '/board.js'):
             body = (ASSETS / path[1:]).read_bytes()
             mime = 'text/css' if path.endswith('css') else 'application/javascript'
+        elif path in ('/brand/let-them-cook-light.png', '/brand/let-them-cook-dark.png'):
+            body = (ASSETS.parent / path.lstrip('/')).read_bytes()
+            mime = 'image/png'
         else:
             try:
                 with closing(connect(self.server.db)) as conn:
@@ -380,13 +387,14 @@ class Handler(BaseHTTPRequestHandler):
             if status == 200 and self.headers.get('If-None-Match') == headers['ETag']:
                 status, body = 304, b''
         self.send_response(status)
-        self.send_header('Content-Type', mime + '; charset=utf-8')
+        content_type = mime + ('; charset=utf-8' if mime.startswith(('text/', 'application/javascript')) else '')
+        self.send_header('Content-Type', content_type)
         if status != 304:
             self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Referrer-Policy', 'no-referrer')
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src data:; frame-ancestors 'none'; form-action 'none'; base-uri 'none'")
+        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'none'; base-uri 'none'")
         for key, value in headers.items():
             self.send_header(key, value)
         self.end_headers()
