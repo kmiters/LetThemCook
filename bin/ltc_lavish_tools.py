@@ -63,9 +63,10 @@ def check_server(env):
         response = client.getresponse()
         if response.status == 200:
             health = json.loads(response.read(65536))
-            if (health.get('app') == 'lavish-axi' and health.get('hosts') == ['127.0.0.1']
+            if (isinstance(health, dict) and health.get('app') == 'lavish-axi'
+                    and health.get('hosts') == ['127.0.0.1']
                     and health.get('state_dir') == env['LAVISH_AXI_STATE_DIR']):
-                return
+                return health
     except ConnectionRefusedError:
         return
     finally:

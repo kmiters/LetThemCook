@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
 import importlib.machinery
 import importlib.util
@@ -10,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from threading import Event
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +26,10 @@ loader.exec_module(cli)
 
 class LavishTest(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('HC_TERMINAL_ID', None)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve()
@@ -47,7 +53,7 @@ class LavishTest(unittest.TestCase):
         self.tool_patch(cli, 'decode', side_effect=lambda raw: True if raw == b'ready: true' else json.loads(raw))
         self.tool_patch(cli.shutil, 'which', return_value='/local/bin/tool')
         self.tool_patch(cli, 'free_port', return_value=45678)
-        self.tool_patch(cli, 'check_server')
+        self.health = self.tool_patch(cli, 'check_server', return_value={'listeners': []})
         self.capture = self.tool_patch(cli, 'capture', side_effect=self.fixture_capture)
         self.tool_patch(cli, 'lavish', side_effect=self.provider)
         self.tool_patch(cli.subprocess, 'run', side_effect=self.poll)
@@ -78,6 +84,7 @@ class LavishTest(unittest.TestCase):
         self.assertEqual(argv[:2], ['lavish-axi', 'poll'])
         self.calls.append('poll')
         session, prompts = self.queue.pop(0)
+        self.health.return_value = {'listeners': []}
         stdout.write(json.dumps({'session': dict(file=argv[2], **session), 'prompts': prompts, 'dom_snapshot': ''}).encode())
         return subprocess.CompletedProcess(argv, 0)
 
@@ -213,6 +220,326 @@ class LavishTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Incomplete feedback'):
             self.action('end')
         self.assertTrue(bad.exists())
+
+    def fake_herdr(self):
+        self.hc_calls = []
+        self.terminals = {}
+        listener = cli.listener
+        self.tool_patch(cli.inbox, 'caller', return_value=cli.inbox.Agent('fixture-session', 'fixture-chef', 'fixture-space'))
+        self.conn.execute("UPDATE projects SET space='fixture-space' WHERE id=1")
+        self.conn.commit()
+
+        def hc(session, *argv, **options):
+            self.assertEqual(session, 'fixture-session')
+            self.hc_calls.append(argv)
+            if argv[0] == 'get':
+                info = self.terminals.get(argv[1])
+                if not info:
+                    raise subprocess.CalledProcessError(3, argv)
+                return subprocess.CompletedProcess(argv, 0, json.dumps(info))
+            self.assertEqual(argv[0], 'run')
+            self.assertIn('--no-notify', argv)
+            self.assertIn('--no-parent', argv)
+            labels = dict(argv[i + 1].split('=', 1) for i, arg in enumerate(argv) if arg == '--label')
+            name = argv[argv.index('--name') + 1]
+            address = 't' + str(len(self.terminals) + 1)
+            info = dict(state='live', address=address, name=name, labels=labels)
+            self.terminals[address] = self.terminals[name] = info
+            self.assertEqual(labels['ltc.lavish.project'], '1')
+            self.assertEqual(labels['ltc.lavish.member'], '1')
+            self.assertEqual(labels['herdr.space'], 'fixture-space')
+            self.assertEqual(argv[argv.index('--db') + 1], str(self.db))
+            self.assertEqual(argv[-2:], ('--member', 'web'))
+            self.assertEqual(argv[argv.index('--generation') + 1], labels['ltc.lavish.generation'])
+            self.health.return_value = {'listeners': [
+                {'key': self.session_key, 'label': 'ltc-' + labels['ltc.lavish.generation']}]}
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'address': address}))
+
+        return self.tool_patch(listener, 'call_hc', side_effect=hc)
+
+    def receive(self, armed):
+        self.args.generation = armed['generation']
+        with patch.dict(os.environ, HC_SESSION='fixture-session', HC_TERMINAL_ID=armed['terminal']):
+            return self.action('_receive')
+
+    def test_managed_batches_disconnect_final_delivery_and_idempotent_resume(self):
+        self.fake_herdr()
+        with patch.dict(os.environ, HC_TERMINAL_ID='fixture-chef'):
+            armed = self.open()['receiver']
+        self.assertEqual(armed['state'], 'listening')
+        self.assertEqual(self.action('resume')['receiver'], armed)
+        with self.assertRaisesRegex(ValueError, 'running receiver'):
+            self.action('import')
+        self.assertEqual(sum(argv[0] == 'run' for argv in self.hc_calls), 1)
+        self.queue.extend([({'status': 'feedback'}, [{'prompt': 'first'}]),
+                           ({'status': 'browser_disconnected'}, []),
+                           ({'status': 'feedback', 'session_ended': True}, [{'prompt': 'second'}])])
+        with patch.object(cli.time, 'sleep'):
+            self.assertEqual(self.receive(armed)['status'], 'ended')
+        self.terminals[armed['terminal']]['state'] = 'finished'
+        self.assertEqual(self.action('end')['status'], 'ended')
+        self.assertEqual(self.action('status')['receiver']['runtime'], 'finished')
+        self.assertEqual([(t['project_id'], t['member_id']) for t in self.tasks()], [(1, 1), (1, 1)])
+        self.assertFalse(self.folder.exists())
+        self.assertEqual(self.calls.count('stop'), 1)
+        self.assertEqual(set(argv[0] for argv in self.hc_calls), {'run', 'get'})
+
+    def test_restart_replays_receipt_before_rearming_poll(self):
+        self.fake_herdr()
+        self.open()
+        first = self.action('resume')['receiver']
+        self.queue.append(({'status': 'feedback'}, [{'prompt': 'retained'}]))
+        self.conn.execute("""CREATE TRIGGER fail_import BEFORE INSERT ON lavish_imports
+                             BEGIN SELECT RAISE(ABORT, 'fixture failure'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.receive(first)
+        receipt, = self.folder.glob('receipt-*.toon')
+        self.assertIn(b'retained', receipt.read_bytes())
+        self.assertEqual(self.tasks(), [])
+        self.terminals[first['terminal']]['state'] = 'finished'
+        self.health.return_value = {'listeners': []}
+        self.assertIn('fixture failure', self.action('status')['receiver']['detail'])
+        self.conn.execute('DROP TRIGGER fail_import')
+        second = self.action('resume')['receiver']
+        self.assertNotEqual(first['generation'], second['generation'])
+        with self.assertRaisesRegex(ValueError, 'generation'):
+            self.receive(first)
+        self.queue.append(({'status': 'ended'}, []))
+        self.receive(second)
+        self.assertEqual(self.calls.count('poll'), 2)
+        self.assertEqual(len(self.tasks()), 1)
+        self.assertFalse(receipt.exists())
+
+    def test_foreign_poll_terminal_and_generation_never_taken_over(self):
+        self.fake_herdr()
+        self.open()
+        for key in (self.session_key, 'b' * 16):
+            self.health.return_value = {'listeners': [{'key': key, 'label': 'other'}]}
+            for cmd in ('resume', 'end'):
+                with self.assertRaisesRegex(ValueError, 'listener'):
+                    self.action(cmd)
+        self.assertFalse(self.hc_calls)
+        self.health.return_value = {'listeners': []}
+        armed = self.action('resume')['receiver']
+        with self.assertRaisesRegex(ValueError, 'registered Herdr terminal'):
+            self.receive(dict(armed, terminal='foreign'))
+        self.terminals[armed['terminal']]['labels']['ltc.lavish.member'] = '2'
+        for cmd in ('end', 'resume'):
+            with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                self.action(cmd)
+        self.assertEqual(self.action('status')['receiver']['state'], 'unverified')
+        self.assertNotIn('end', self.calls)
+        self.assertNotIn('stop', self.calls)
+        self.assertNotIn('poll', self.calls)
+
+    def test_launch_failure_and_absent_readiness_are_visible(self):
+        hc = self.fake_herdr()
+        self.open()
+        original = hc.side_effect
+        hc.side_effect = subprocess.CalledProcessError(1, ['hc', 'run'])
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.action('resume')
+        hc.side_effect = original
+        self.assertEqual(self.action('status')['receiver']['state'], 'launch_error')
+        self.health.side_effect = lambda env: {'listeners': []}
+        with patch.object(cli.time, 'monotonic', side_effect=[0, 16]):
+            with self.assertRaisesRegex(ValueError, 'Timed out'):
+                self.action('resume')
+        self.assertEqual(self.action('status')['receiver']['state'], 'starting')
+        self.health.side_effect = None
+        self.assertEqual(self.action('resume')['receiver']['state'], 'listening')
+
+    def test_foreground_override_and_scoped_read_only_legacy_scan(self):
+        self.args.foreground = True
+        with patch.dict(os.environ, HC_TERMINAL_ID='human-shell'):
+            self.assertEqual(self.open()['receiver']['state'], 'foreground_required')
+        self.args.review = None
+        self.conn.execute('DROP TABLE lavish_listeners')
+        self.conn.execute('PRAGMA query_only=ON')
+        results = self.action('status')
+        self.assertEqual([r['review'] for r in results], [self.folder.name])
+        self.assertEqual(results[0]['receiver']['state'], 'foreground_required')
+        self.args.member = 'api'
+        self.assertEqual(self.action('status'), [])
+        self.conn.execute('PRAGMA query_only=OFF')
+
+    def test_transient_poll_disconnect_retries_without_consuming_saved_output(self):
+        self.fake_herdr()
+        self.open()
+        armed = self.action('resume')['receiver']
+        count = 0
+
+        def interrupted(argv, *, env, stdout, pass_fds):
+            nonlocal count
+            count += 1
+            if count == 1:
+                stdout.write(json.dumps({'code': 'SERVER_ERROR',
+                    'error': 'Lavish Editor poll response was interrupted'}).encode())
+                return subprocess.CompletedProcess(argv, 1)
+            return self.poll(argv, env=env, stdout=stdout, pass_fds=pass_fds)
+
+        self.queue.append(({'status': 'feedback', 'session_ended': True}, [{'prompt': 'saved once'}]))
+        with patch.object(cli.subprocess, 'run', side_effect=interrupted), patch.object(cli.time, 'sleep') as sleep:
+            self.receive(armed)
+        sleep.assert_called_once_with(1)
+        self.assertEqual(count, 2)
+        self.assertEqual(len(self.tasks()), 1)
+
+    def test_only_live_cook_for_selected_project_and_member_can_start(self):
+        self.fixture_reports()
+        self.conn.execute("UPDATE projects SET space='s' WHERE id=1")
+        self.conn.execute("UPDATE cook_runs SET terminal='fixture-cook' WHERE id=20")
+        self.conn.commit()
+        token = self.conn.execute('SELECT token FROM registry_identity').fetchone()[0]
+        info = {'address': 'fixture-cook', 'state': 'live', 'labels': {
+            'herdr.space': 's', 'ltc.registry': token, 'ltc.member': '1',
+            'ltc.project': '1', 'ltc.run': '20', 'ltc.task': '10'}}
+        with patch.dict(os.environ, HC_TERMINAL_ID='fixture-cook', HC_SESSION='test', HC_SOCKET=''), patch.object(
+                cli.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(info))):
+            self.assertEqual(cli.inbox.caller(self.conn, 1, 1).session, 'test')
+            for project, member in [(1, 2), (2, None)]:
+                with self.assertRaisesRegex(ValueError, 'does not own'):
+                    cli.inbox.caller(self.conn, project, member)
+            info['labels']['ltc.registry'] = 'foreign'
+            with patch.object(cli.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(info))):
+                with self.assertRaisesRegex(ValueError, 'does not own'):
+                    cli.inbox.caller(self.conn, 1, 1)
+
+    def managed_html(self):
+        self.fake_herdr()
+        self.args.command = 'html'
+        self.args.file = self.root / 'sample.html'
+        self.args.file.write_text('<h1>Sample</h1>')
+        (self.root / 'private.txt').write_text('unrelated')
+        with patch.dict(os.environ, HC_TERMINAL_ID='fixture-chef'):
+            opened = self.open()
+        self.assertEqual(opened['capture'], 'html')
+        self.assertEqual(cli.artifact(self.folder).read_text(), self.args.file.read_text())
+        self.assertEqual([p.name for p in cli.artifact(self.folder).parent.iterdir()], ['snapshot.html'])
+        self.capture.assert_not_called()
+        self.args.wait = 0
+        return opened['receiver']
+
+    def queue_op(self, command, batch=None):
+        self.args.command, self.args.batch = command, batch
+        return cli.inbox.operate(self.conn, self.args, *cli.owner(self.conn, self.args))
+
+    def test_owner_inbox_repeats_lost_notice_and_final_batch_until_explicit_ack(self):
+        armed = self.managed_html()
+        self.queue.extend([({'status': 'feedback'}, [{'prompt': 'note one'}]),
+                           ({'status': 'browser_disconnected'}, []),
+                           ({'status': 'feedback', 'session_ended': True}, [{'prompt': 'final note'}])])
+        self.receive(armed)
+        self.assertFalse(self.folder.exists())
+        self.assertEqual(self.action('status')['delivery'], dict(channel='owner_inbox', stored=2,
+                         id_offered=0, read_requested=0, acknowledged=0, awaiting_ack=2))
+        # Drop the first ID-only response. A separate CLI invocation gets both IDs again.
+        offered = self.queue_op('inbox')['batches']
+        self.assertEqual(self.queue_op('inbox')['batches'], offered)
+        first, final = [r['batch'] for r in offered]
+        self.assertNotIn('note', json.dumps(offered))
+        with self.assertRaisesRegex(ValueError, 'Read this batch'):
+            self.queue_op('ack', final)
+        with self.conn:
+            self.conn.execute("UPDATE tasks SET description='Backlog edit' WHERE id=?", (final,))
+        for batch, expected in [(first, 'note one'), (final, 'final note')]:
+            self.assertEqual(self.queue_op('read', batch)['feedback']['annotations'], [{'prompt': expected}])
+            self.assertEqual(self.queue_op('ack', batch), self.queue_op('ack', batch))
+        self.assertEqual(self.queue_op('inbox'), {'batches': []})
+        self.assertEqual(self.action('status')['delivery']['acknowledged'], 2)
+        self.assertTrue(self.args.file.exists())
+        self.assertFalse(self.folder.exists())
+
+    def test_active_wait_wakes_after_commit_and_chef_supervision_reoffers_only_its_ids(self):
+        from ltc_watch import read_inbox, schema
+        armed = self.managed_html()
+        self.queue.append(({'status': 'feedback', 'session_ended': True}, [{'prompt': 'private feedback'}]))
+        waiting = Event()
+        original = cli.inbox.pending
+
+        def observe(*args, **kwargs):
+            items = original(*args, **kwargs)
+            if not items:
+                waiting.set()
+            return items
+
+        def wait_in_own_connection():
+            args = argparse.Namespace(command='inbox', wait=5)
+            with sqlite3.connect(self.db) as connection:
+                connection.row_factory = sqlite3.Row
+                return cli.inbox.operate(connection, args, 1, 1)
+
+        with patch.object(cli.inbox, 'pending', side_effect=observe), ThreadPoolExecutor(max_workers=1) as worker:
+            future = worker.submit(wait_in_own_connection)
+            self.assertTrue(waiting.wait(timeout=2))
+            self.receive(armed)
+            notice = future.result(timeout=5)['batches']
+        self.assertEqual(len(notice), 1)
+        self.assertEqual(set(notice[0]), {'batch', 'review', 'member'})
+        schema(self.conn)
+        self.conn.execute("INSERT INTO watch_targets VALUES (1, 'fixture-chef', 'fixture-session', 'fixture-space')")
+        self.conn.commit()
+        token = self.conn.execute('SELECT token FROM registry_identity').fetchone()[0]
+        binding = ('fixture-chef', 'fixture-session', 'fixture-space', token)
+        with patch.dict(os.environ, HC_TERMINAL_ID='fixture-chef'), patch('ltc_watch.verify_callback', return_value=binding):
+            self.assertEqual(read_inbox(self.conn, 1, False)['lavish_batches'], notice)
+            self.assertEqual(read_inbox(self.conn, 1, False)['lavish_batches'], notice)
+            self.assertEqual(self.action('status')['delivery']['acknowledged'], 0)
+            self.queue_op('read', notice[0]['batch'])
+            self.queue_op('ack', notice[0]['batch'])
+            self.assertEqual(read_inbox(self.conn, 1, False)['lavish_batches'], [])
+
+    def test_verified_run_ancestry_limits_batch_read_and_ack(self):
+        self.fixture_reports()
+        armed = self.managed_html()
+        with self.conn:
+            self.conn.execute("UPDATE lavish_owners SET run_id=20, terminal='cook-a' WHERE review=?", (self.args.review,))
+        self.queue.append(({'status': 'feedback', 'session_ended': True}, [{'prompt': 'cook only'}]))
+        self.receive(armed)
+        batch = self.conn.execute('SELECT id FROM lavish_batches').fetchone()[0]
+        self.assertEqual(self.queue_op('inbox')['batches'], [])  # Verified Chef, Cook-owned batch.
+        chef = cli.inbox.Agent('fixture-session', 'fixture-chef', 'fixture-space')
+        self.assertEqual(cli.inbox.pending(self.conn, 1, None, chef, all_members=True), [])
+        with self.assertRaisesRegex(ValueError, 'not found'):
+            self.queue_op('read', batch)
+        agent = cli.inbox.Agent('fixture-session', 'cook-b', 'fixture-space', 21)
+        with patch.object(cli.inbox, 'caller', return_value=agent):
+            for cmd in ('ack', 'read'):
+                with self.assertRaisesRegex(ValueError, 'not found'):
+                    self.queue_op(cmd, batch)
+        with self.conn:
+            self.conn.execute("""INSERT INTO cook_runs(id,task_id,project_id,member_id,space,worktree,base,
+                hc_session,name,profile,launch_state,resumed_from) SELECT 41,task_id,project_id,member_id,
+                space,worktree,base,hc_session,name,profile,launch_state,id FROM cook_runs WHERE id=20""")
+        resumed = cli.inbox.Agent('fixture-session', 'cook-resumed', 'fixture-space', 41)
+        with patch.object(cli.inbox, 'caller', return_value=resumed):
+            self.args.member = 'api'
+            with self.assertRaisesRegex(ValueError, 'not found'):
+                self.queue_op('read', batch)
+            self.args.member = 'web'
+            self.assertEqual(self.queue_op('read', batch)['batch'], batch)
+            self.queue_op('ack', batch)
+        saved = self.conn.execute('SELECT ack_run,ack_terminal FROM lavish_batches').fetchone()
+        self.assertEqual(tuple(saved), (41, 'cook-resumed'))
+
+    def test_queue_write_failure_rolls_back_task_and_replays_original_receipt(self):
+        armed = self.managed_html()
+        self.conn.execute("""CREATE TRIGGER fail_batch BEFORE INSERT ON lavish_batches
+            BEGIN SELECT RAISE(ABORT,'simulated queue failure'); END""")
+        self.queue.append(({'status': 'feedback', 'session_ended': True}, [{'prompt': 'survives restart'}]))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, 'queue failure'):
+            self.receive(armed)
+        receipt, = self.folder.glob('receipt-*.toon')
+        self.assertTrue(receipt.stat().st_size)
+        for table in ('tasks', 'lavish_imports', 'lavish_batches'):
+            self.assertEqual(self.conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0], 0)
+        self.terminals[armed['terminal']]['state'] = 'finished'
+        self.conn.execute('DROP TRIGGER fail_batch')
+        restarted = self.action('resume')['receiver']
+        self.health.return_value = {'listeners': []}  # Replay the terminal receipt without a new poll.
+        self.receive(restarted)
+        self.assertEqual(self.calls.count('poll'), 1)
+        self.assertEqual(len(self.queue_op('inbox')['batches']), 1)
 
     def fixture_reports(self):
         with self.conn:

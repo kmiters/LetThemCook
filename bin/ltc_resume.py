@@ -122,6 +122,7 @@ def main():
     ensure_runs(conn)
     new_id = start_run(conn, run['task_id'], run['project_id'], run['space'], worktree,
                        run['base'], run['hc_session'], name, route, session_id, role=role)
+    conn.execute('UPDATE cook_runs SET resumed_from=? WHERE id=?', (run['id'], new_id))
     if member:
         conn.execute('UPDATE cook_runs SET member_id = ? WHERE id = ?', (member['id'], new_id))
     conn.commit()

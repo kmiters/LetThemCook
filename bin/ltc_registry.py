@@ -28,6 +28,8 @@ def ensure_runs(conn):
     )''')
     # NULL harness identifies runs written by the old Codex-only launcher.
     columns = {row[1] for row in conn.execute('PRAGMA table_info(cook_runs)')}
+    if 'resumed_from' not in columns:
+        conn.execute('ALTER TABLE cook_runs ADD COLUMN resumed_from INTEGER REFERENCES cook_runs(id)')
     for column in ('harness', 'model', 'reasoning_effort', 'claude_session_id'):
         if column not in columns:
             conn.execute(f'ALTER TABLE cook_runs ADD COLUMN {column} TEXT')
