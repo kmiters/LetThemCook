@@ -76,6 +76,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', default=os.environ.get('LTC_DB', str(ROOT / '.letthemcook' / 'registry.sqlite3')))
     parser.add_argument('--watch', action='store_true', help='Keep synchronizing open Spaces')
+    parser.add_argument('--onboarding', action='store_true', help='Deliver the pending setup handoff to one Chef')
     parser.add_argument('--use-codex-display-settings', action='store_true',
                         help='Use your Codex transcript and folding settings for new Chefs')
     parser.add_argument('--use-claude-display-settings', action='store_true',
@@ -83,6 +84,8 @@ def main():
     parser.add_argument('--interval', type=int, default=15, help='Watch interval in seconds (default: 15)')
     parser.add_argument('project', nargs='?', help='Only synchronize this project')
     args = parser.parse_args()
+    if args.onboarding and (not args.project or args.watch):
+        parser.error('--onboarding requires a single project and a one-shot launch')
     if args.interval < 1:
         parser.error('--interval must be positive')
     if args.watch:
@@ -100,7 +103,7 @@ def main():
         except KeyboardInterrupt:
             return 0
     registry = [str(ROOT / 'bin' / 'ltc-db'), '--db', args.db, 'project']
-    projects = [json.loads(run(registry + ['show', args.project]))] if args.project else json.loads(run(registry + ['list']))
+    projects = [json.loads(run(registry + ['show', '--', args.project]))] if args.project else json.loads(run(registry + ['list']))
     # Serialize the tab lookup and creation across one-shot and watch invocations.
     lock_path = Path(args.db).expanduser().resolve()
     lock = lock_path.with_name(lock_path.name + '.chef.lock').open('a')
@@ -120,10 +123,13 @@ def main():
             path = Path(project['path'])
             if not path.is_dir():
                 raise ValueError('Project checkout is unavailable')
-            name = '👨‍🍳 Chef @ ' + project['name']
-            # Existing Chefs keep running under the old name during migration.
-            legacy_name = 'Chef @ ' + project['name']
-            matching = [t for t in space.get('tabs', []) if t.get('name') in (name, legacy_name)]
+            installation = path.resolve() == ROOT
+            labels = {project['name']}
+            if installation:
+                labels.add('Let Them Cook')
+            names = {prefix + label for prefix in ('👨‍🍳 Chef @ ', 'Chef @ ') for label in labels}
+            name = '👨‍🍳 Chef @ ' + ('Let Them Cook' if installation and args.onboarding else project['name'])
+            matching = [t for t in space.get('tabs', []) if t.get('name') in names]
             if matching:
                 report.update(status='already_present', tabs=[t['id'] for t in matching])
             else:
@@ -137,6 +143,15 @@ def main():
                                + '\nProject description: ' + project['description']
                                + '\nRegistered member checkouts:\n'
                                + '\n'.join(f"- {m['name']}: {m['path']}" for m in project['members']))
+                if args.onboarding:
+                    if installation:
+                        prompt += '\n\n' + (ROOT / 'prompts' / 'onboarding-root.md').read_text()
+                    else:
+                        prompt += ('\n\nAfter binding and reading status, collect the setup handoff with '
+                                   'the assigned LetThemCook bin/ltc-onboard --db DATABASE receive PROJECT. '
+                                   'Greet the user with the saved goal in their language and ask whether '
+                                   'they want to begin. The goal is context only. Wait for their answer '
+                                   'before creating a task, dispatching a Cook or changing the checkout.')
                 harness = project['chef_harness']
                 task = []
                 if harness == 'claude':
@@ -153,7 +168,10 @@ def main():
                         argv += ['-c', 'tui.fullscreen_transcript=true', '-c', 'tui.collapse_turn_details=true']
                     for option in codex_hook_overrides(project['name'], Path(args.db).expanduser().resolve(), path):
                         argv.extend(option)
-                    task = ['--task', prompt]
+                    if args.onboarding:
+                        argv += ['--', prompt]
+                    else:
+                        task = ['--task', prompt]
                 else:
                     raise ValueError('Unknown project Chef harness')
                 output = run(['herdr-app', 'do', 'tab.new', '--name', name, '--space', space_id,

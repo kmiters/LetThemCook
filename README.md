@@ -6,9 +6,19 @@ Give a coding task to your project's **Chef** in Herdr Desktop. The Chef keeps t
 
 ## Place your first order
 
-1. Open a local Space in Herdr Desktop and [connect your Git checkout](docs/setup.md#register-your-first-project). You can choose a Codex or Claude Code Chef.
-2. Open the **Chef @ your-project** tab and complete any startup prompts. Tell the Chef what you want and how you'll know it works.
-3. Open the review link from the Chef. Ask for revisions in the same conversation or explicitly accept the result for integration into local main.
+Open Herdr Desktop. With Git and either Codex or Claude Code installed, clone LetThemCook and start a conversation in its folder.
+
+```sh
+git clone https://github.com/kmiters/LetThemCook.git
+cd LetThemCook
+codex "Set up LetThemCook"
+```
+
+For Claude Code, use `claude "Set up LetThemCook"` as the last command. Follow the CLI’s sign-in prompts and review the folder it asks you to trust. If you arrive at an empty conversation, or your agent was already open in the checkout, say **“Set up LetThemCook.”**
+
+1. Your agent connects this installation to Herdr and tells you where to find **Chef @ Let Them Cook**. Open that tab and complete any sign-in or folder trust prompt there.
+2. The Chef asks “What would you like to cook up?” and “Which folder is your project in?” Give it your goal and the path to a Git project with at least one commit.
+3. Open **Chef @ your-project**. After it connects, it picks up your goal and asks whether to begin. When you’re ready, tell it to go ahead.
 
 Here are a few things you can say to your Chef.
 

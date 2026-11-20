@@ -21,6 +21,13 @@ def verify_callback(conn, project_id, address):
     chef, bound_session, space, token = binding
     if chef != address or bound_session != (os.environ.get('HC_SESSION') or 'default'):
         raise ValueError('Chef address or Herdr session does not match the project binding')
+    verify_live_binding(project_id, binding)
+    return binding
+
+
+def verify_live_binding(project_id, binding):
+    """Inspect the bound terminal in its own session, including from outside Herdr."""
+    chef, bound_session, space, token = binding
     env = dict(os.environ, HC_SESSION=bound_session)
     env.pop('HC_SOCKET', None)
     data = json.loads(subprocess.run(['hc', 'get', chef], env=env, text=True,
@@ -30,4 +37,4 @@ def verify_callback(conn, project_id, address):
     if (not isinstance(labels, dict) or data.get('address') != chef or data.get('state') != 'live'
             or any(labels.get(k) != v for k, v in expected.items())):
         raise ValueError('Live Chef identity does not match the registered endpoint')
-    return binding
+    return data
