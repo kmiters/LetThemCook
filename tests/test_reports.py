@@ -70,6 +70,13 @@ print(os.environ['TEST_COOK' if sys.argv[2]=='cook' else 'TEST_CHEF'])
             self.assertEqual(retry.returncode, 0, retry.stderr)
             self.assertEqual(json.loads(retry.stdout)['report_id'], 1)
         self.assertEqual(self.report('Follow-up').returncode, 0)
+        focused = subprocess.run([BIN/'ltc-db', 'task', 'show', '1', '--report', '1'], env=self.env,
+                                 text=True, capture_output=True, check=True)
+        self.assertEqual(json.loads(focused.stdout)['outcome'], '<result>')
+        self.assertNotIn('Follow-up', focused.stdout)
+        wrong_task = subprocess.run([BIN/'ltc-db', 'task', 'show', '2', '--report', '1'], env=self.env,
+                                    text=True, capture_output=True)
+        self.assertIn('Report not found for this task', wrong_task.stderr)
         with closing(connect(self.db)) as conn:
             board, new_revision = lookup(conn, '/projects/1')[1]
             self.assertNotEqual(new_revision, revision)

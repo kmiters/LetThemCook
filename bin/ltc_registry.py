@@ -147,9 +147,12 @@ def has_reports(conn):
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cook_reports'").fetchone() is not None
 
 
-def task_reports(conn, project_id, task_id):
+def task_reports(conn, project_id, task_id, *, report_id=None):
     if not has_reports(conn):
         return []
-    return [dict(row) for row in conn.execute('''SELECT p.id, p.run_id, p.outcome, p.validation, p.review_url, p.created_at
+    query = '''SELECT p.id, p.run_id, p.outcome, p.validation, p.review_url, p.created_at
         FROM cook_reports p JOIN cook_runs r ON r.id=p.run_id
-        WHERE r.task_id=? AND r.project_id=? ORDER BY p.id DESC LIMIT 20''', (task_id, project_id))]
+        WHERE r.task_id=? AND r.project_id=?'''
+    if report_id is not None:
+        return [dict(row) for row in conn.execute(query + ' AND p.id=?', (task_id, project_id, report_id))]
+    return [dict(row) for row in conn.execute(query + ' ORDER BY p.id DESC LIMIT 20', (task_id, project_id))]

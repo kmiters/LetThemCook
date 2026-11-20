@@ -40,13 +40,15 @@ For example, two accepted tasks may show that integration checks must run from a
 
 The Chef records a self-contained brief and launches the Cook from its verified terminal in the assigned Herdr Space. Use the Chef's assigned registry via `LTC_DB`.
 
+For new work, scope the edit and its check before choosing a profile. Default to `simple` for small edits with a quick check, such as padding, spacing, copy, CSS or localized code. The same rule applies to Designer and Developer. With shipped Codex this selects GPT-6 Luna. Choose `routine` (Sol on Codex) for work beyond that scope or when Luna's results show a concrete need to escalate. Choose `complex` (Astra on Codex) for cross-component work, high complexity or a justified difficult diagnosis. Honor explicit user choices and use the selected harness's configured profile mappings. Send follow-ups to the same Cook and use the recorded settings on resume. [Cook profiles and agent CLIs](configuration.md#cook-profiles-and-agent-clis)
+
 ```sh
-bin/ltc-db task add my-app 'Fix the settings save button' \
-  --intent 'Make settings save successfully' \
-  --context 'The settings page currently ignores Save' \
-  --scope 'Settings page' --acceptance 'Changes survive reload' \
-  --checks 'Reopen settings after saving'
-bin/ltc-cook my-app 12 --role developer --profile routine
+bin/ltc-db task add my-app 'Clarify the settings save label' \
+  --intent 'Rename Save to Save settings' \
+  --context 'The current label is Save' \
+  --scope 'Settings button label' --acceptance 'The button reads Save settings' \
+  --checks 'Open settings and inspect the button'
+bin/ltc-cook my-app 12 --role designer --profile simple
 ```
 
 Replace `12` with the ID returned by task creation. Select `--harness claude` or `--harness pi` as needed. `ltc-cook PROJECT TASK_ID [WORKTREE_NAME] [PROFILE]` also accepts the legacy positional profile. Use either that position or `--profile`. `--config PATH` chooses a [Cook configuration](configuration.md#prompts-and-alternate-configs).
@@ -82,22 +84,23 @@ The board card shows the latest outcome. The ticket and `ltc-db task show` inclu
 
 ## Cook watcher
 
-At startup the Chef runs `bin/ltc-watch start my-app` in the project Space, then reads `bin/ltc-status my-app` and the project inbox. Use the assigned registry for each command and the recorded Herdr session without an `HC_SOCKET` override. One watcher holds the project and registry lock. The watcher binds the live Chef, polls up to eight Cook terminals concurrently every 15 seconds and records changes in SQLite. It records launch problems and observed done, blocked, error, finished and unknown states. Short transitions between checks can be missed. Reports are saved independently of the watcher.
+At startup the Chef runs `bin/ltc-watch start my-app` in the project Space and reads `bin/ltc-status my-app`. Use the assigned registry via `LTC_DB` without an `HC_SOCKET` override. One existing watcher holds the project and registry lock, verifies Cook terminals in their recorded sessions, and records observations in SQLite. Short transitions between scans can be missed. Reports are saved independently.
 
-From the bound Chef terminal, use the following cycle during active supervision. Read the inbox immediately after dispatch, resume or follow-up. Wait while work is pending, then check again on every return, including timeouts.
+After startup, dispatch, resume or follow-up, run one tracked foreground wait from the bound Chef terminal. Leave that invocation pending while supervising. It checks internally every two seconds and returns when there are updates or supervision reaches an explicit end. Ctrl-C interrupts the command. There is no default deadline and routine empty checks produce no output.
 
 ```sh
-bin/ltc-watch inbox my-app
-hc wait --children any --timeout 30
-bin/ltc-watch inbox my-app
-bin/ltc-db task show 12
+bin/ltc-wait my-app
+bin/ltc-db task show 12 --report 8
+bin/ltc-wait my-app --ack report:8 --ack event:19
 ```
 
-The wait returns child activity as command output. For a surviving Cook parented to an earlier Chef, check its run identity with `ltc-status` and wait on that terminal in its recorded session using `hc wait ADDRESS --timeout 30`. The inbox returns up to 20 unread report references and 20 recorded transitions per read. Read again if either batch is full. Open the indicated task and match its run and report IDs. The current Chef claims each entry once, including across restarts or simultaneous reads. Pickup covers open tasks in the current Space and the latest attempt per worktree. Use `bin/ltc-watch inbox my-app --recent` to inspect the latest 20 entries of each kind across the project history without acknowledging them. Run `ltc-status` to confirm current state before acting on a transition.
+Each response includes up to ten references per kind and may include managed Lavish batch references. Open the indicated record and match the task, run and report IDs. Confirm live state with `ltc-status` before acting on a transition. A `live` reference means the watcher has observed activity again after a recorded transition. Report references also cover earlier runs in the current Space so retrying a Cook cannot hide a saved report. Use the same wait for Cooks launched under another parent.
 
-An idle Chef receives updates on its next check. On returning, inspect active tickets for unresolved questions, including those already read. Review the diff and checks, answer the Cook directly where possible, and relay decisions, consequential blockers and reviewed results to the user in plain language.
+Pass only references you have read as repeated `--ack REF` arguments on the next wait. Add `--check` to acknowledge and check once before returning to chat. It can return a new batch that remains pending until acknowledged. A disconnect, interrupt, or Chef terminal replacement in the same project and Space leaves unread references available. The old inbox uses the same report and event acknowledgment flags. Managed Lavish uses its own `ltc-lavish read` and `ltc-lavish ack` workflow after reading the full batch, including after Send & End. The wait can remain open while an owned managed receiver is active in the same Herdr session and Space. For an uncertain receiver, use `ltc-lavish status`.
 
-Launch and resume pass `hc run --no-notify` while preserving the parent used by `hc wait`. Existing Cook terminals retain their launch settings and earlier prompts. A watcher already running older code retains its delivery loop, and `ltc-watch start` reuses that process. To switch a live project, its operator can identify its watcher using the registry and project labels and its command line. Stop that watcher alone, then run `ltc-watch start PROJECT` from the bound Chef and give existing agents the new supervision and reporting instructions. Stock notes from an existing Cook can continue until its next launch. The Chef tab sync loop does not restart watchers. When the watcher is stopped, `bin/ltc-watch run my-app --once` records a single observation cycle.
+An `idle` response means no work is currently observed. The wait allows one normal observation interval for a recent follow-up to become visible. `unverified` means the watcher could not confirm a terminal state. Use `ltc-status` to inspect the specific run. `watcher_unavailable` means the project watcher lock is free. From the bound Chef terminal run `ltc-watch start my-app`, then retry. If health remains uncertain, inspect the recorded watcher and its output. With the watcher stopped, `ltc-watch run my-app --once` records a single observation cycle. Binding or persistent registry errors exit with a diagnostic. Fix the endpoint or registry access, then run the same wait. `--timeout SECONDS` is an optional overall deadline for a bounded check. At the deadline the command returns `deadline` if there is still pending work and no new entries.
+
+For inbox history or older clients, `ltc-watch inbox my-app --recent` reads up to 20 recent reports and transitions per kind without acknowledging them. The legacy inbox without `--recent` claims its returned reports and transitions immediately. On returning to a project, inspect active tickets for unresolved questions, including those already read. Review the diff and checks, reply to the Cook directly where possible, and relay decisions, consequential blockers and reviewed results to the user. A signal or its acknowledgment grants no acceptance.
 
 ## Board service
 

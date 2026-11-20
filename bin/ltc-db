@@ -56,6 +56,7 @@ def main():
     p.add_argument('--status', choices=STATUSES)
     p = task.add_parser('show')
     p.add_argument('id', type=int)
+    p.add_argument('--report', type=int, metavar='REPORT_ID', help='Return one saved report for this task')
     p = task.add_parser('update')
     p.add_argument('id', type=int)
     p.add_argument('--title', type=nonempty)
@@ -186,7 +187,14 @@ def main():
                 where.append('tasks.status = ?')
             result = [dict(row) for row in conn.execute(task_query + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY tasks.id', values)]
         elif args.action == 'show':
-            result = task_row(args.id)
+            if args.report is None:
+                result = task_row(args.id)
+            else:
+                project = conn.execute('SELECT project_id FROM tasks WHERE id=?', (args.id,)).fetchone()
+                reports = task_reports(conn, project[0], args.id, report_id=args.report) if project else []
+                if not reports:
+                    raise ValueError('Report not found for this task')
+                result = reports[0]
         else:
             existing_task = task_row(args.id)
             updates = {k: getattr(args, k) for k in ('title', 'description', 'status') if getattr(args, k) is not None}
